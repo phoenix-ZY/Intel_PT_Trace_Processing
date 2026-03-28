@@ -1,0 +1,66 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging / installers
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+wheels/
+
+# Test / type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment secrets (if you add dotenv later)
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local reference PDFs (not for distribution / version control)
+DWT_Decoupled_Workload_Tracing_for_Data_Centers.pdf
+
+# Local inputs, intermediates, and run outputs (regenerate with run_* scripts)
+inputs/
+intermediate/
+outputs/
+
+# Large binary traces from perf Intel PT (regenerable; see run_* scripts)
+*.pt.perf.data
+perf.data
+perf.data.*
+
+# Core dumps from crashed SDE / perf / target binaries
+core
+core.*
+vgcore.*
