@@ -1,56 +1,114 @@
 # Intel_PT_Trace_Processing
 
-## Recover memory access addresses from `perf --insn-trace`
+Current workflow for comparing SPEC traces between:
+- SDE real data accesses
+- perf intel_pt recovered data accesses
+- SDE instruction fetch stream
+- perf instruction fetch stream
 
-This directory includes a small emulator utility that takes a decoded Intel PT
-instruction stream like:
+The project now uses one unified analysis pipeline:
+1. `analyze_mem_trace_profiles.py` analyzes one trace.
+2. `compare_mem_trace_metrics.py` compares two analyzed traces.
 
-```
-<tid> <time>:      <ip> insn: <hex bytes...>
-```
+## Main scripts
 
-and **recovers memory read/write addresses** by emulating each instruction with
-Unicorn (x86_64), using virtual initial registers + a virtual memory space.
+- `run_spec5_sde_perf_similarity.py`  
+  Batch runner for SPEC 5xx workloads and warmup sweeps. It orchestrates:
+  - SDE attach and debugtrace collection
+  - perf intel_pt collection
+  - trace conversion/recovery
+  - data + instruction locality comparison
+  - `summary.json` / `summary.csv` output
 
-### Install
+- `sde_debugtrace_convert.py`  
+  Converts SDE debugtrace into:
+  - data mem JSONL (`*.sde.mem.real.jsonl`)
+  - instruction trace (`*.sde.insn.trace.txt`)
+
+- `recover_mem_addrs_uc.c` + `build_recover_mem_addrs_uc.sh`  
+  Unicorn-based C recovery tool that reconstructs memory accesses from
+  instruction trace (`<tid> <time>: <ip> insn: <bytes...>`).
+
+- `analyze_mem_trace_profiles.py`  
+  Single-trace analyzer (data or instruction stream):
+  - Reuse distance histogram (RD)
+  - Stack-distance / miss-ratio curve (SDP/MRC)
+  - Stride distribution and metrics
+
+- `compare_mem_trace_metrics.py`  
+  Compares two analysis JSON files:
+  - RD similarity (`r2`, `l1`, `topk_wmape`, cold-ratio diff)
+  - SDP similarity (`r2`, `mean_abs_error`, `max_abs_error`)
+  - Stride similarity (`r2`, `l1`, `jsd`)
+
+- `align_insn_traces.py`  
+  Unified instruction-trace alignment tool:
+  - default: compute offset only (`offset = pt_idx - sde_idx`)
+  - `--verify`: checkpoint-based same-segment validation
+
+- `analyze_insn_trace_with_xed.py`  
+  Optional helper for sampled ISA/category statistics via `xed`.
+
+## Typical usage
+
+### 1) Build recovery binary
 
 ```bash
-python3 -m pip install -r Intel_PT_Trace_Processing/requirements.txt
+cd Intel_PT_Trace_Processing
+bash build_recover_mem_addrs_uc.sh
 ```
 
-### Run
+### 2) Run SPEC batch comparison
 
 ```bash
-python3 Intel_PT_Trace_Processing/recover_mem_addrs.py \
-  -i Intel_PT_Trace_Processing/inputs/trace.txt \
-  -o Intel_PT_Trace_Processing/outputs/mem/mem_access.jsonl \
-  --max-insns 100000
+python3 run_spec5_sde_perf_similarity.py \
+  --warmup-sweep 5,60,120 \
+  --output-base outputs/spec5_sde_perf_subset
 ```
 
-### Recommended folder layout
+### 3) Inspect outputs
 
-- `inputs/`: source traces (`trace.txt`, `*.debugtrace.txt`, `*.slice.txt`)
-- `intermediate/`: generated instruction traces (`*.insn.trace.txt`)
-- `outputs/mem/`: memory streams (`*.mem.real.jsonl`, `*.mem.virtual.jsonl`)
-- `outputs/rd/`: reuse distance reports (`*.rd.real.txt`, `*.rd.virtual.txt`)
-- `outputs/disasm/`: decoded/disassembly artifacts (`trace.xed.txt`, etc.)
+- Per-case directory:  
+  `outputs/spec5_sde_perf_subset/<bench>/<warmup_tag>/`
+- Final batch summary:
+  - `outputs/spec5_sde_perf_subset/summary.json`
+  - `outputs/spec5_sde_perf_subset/summary.csv`
 
-### Output format
+## Standalone analysis usage
 
-JSON Lines (`.jsonl`), one event per line. Example fields:
+### Analyze one trace
 
-- `ip`: original trace IP (string like `0x...`)
-- `access`: `"read"` or `"write"`
-- `addr`: memory address accessed
-- `size`: access size in bytes
-- `read_value` / `write_value`: best-effort values (may be `null` for some reads)
+```bash
+python3 analyze_mem_trace_profiles.py \
+  --input path/to/trace.jsonl \
+  --trace-kind data \
+  --json-out out.analysis.json
+```
 
-### Notes / limitations
+For instruction trace text:
 
-- The trace does not include real runtime register/memory state. This tool uses
-  **virtual** state (zero or deterministic pseudo-random). So recovered
-  addresses are *plausible under that virtual state*, not guaranteed identical
-  to the real run.
-- Control-flow is forced to follow the trace: after each instruction executes,
-  RIP is overwritten to the next trace IP. This allows running through indirect
-  branches/returns even with incomplete code context.
+```bash
+python3 analyze_mem_trace_profiles.py \
+  --input path/to/trace.insn.trace.txt \
+  --input-format insn_trace \
+  --trace-kind inst \
+  --json-out out.inst.analysis.json
+```
+
+### Compare two analyzed traces
+
+```bash
+python3 compare_mem_trace_metrics.py \
+  --ref-analysis ref.analysis.json \
+  --test-analysis test.analysis.json \
+  --json-out compare.json
+```
+
+## Notes / limitations
+
+- Recovered perf memory addresses are virtualized by emulator state initialization.
+  They are plausible under the configured virtual state, not guaranteed to match
+  real runtime addresses.
+- `recover_mem_addrs_uc` supports state controls like `--init-regs`,
+  `--page-init`, and salvage options; these can significantly affect both
+  speed and similarity quality.

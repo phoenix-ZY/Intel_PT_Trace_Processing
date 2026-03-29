@@ -2,7 +2,7 @@
 """
 Convert Intel SDE debugtrace output into:
 1) a "real" memory-access JSONL stream (for direct reuse-distance stats)
-2) an instruction-bytes trace compatible with recover_mem_addrs.py
+2) an instruction-bytes trace compatible with recover_mem_addrs_uc
 
 Input: SDE debugtrace output with -dt_print_tid 1 and -dt_rawinst 1, e.g.:
   TID0: Read 0x00000008 = *(UINT32*)0x7f... 
@@ -10,7 +10,9 @@ Input: SDE debugtrace output with -dt_print_tid 1 and -dt_rawinst 1, e.g.:
   TID0: Write *(UINT64*)0x7f... = 0x...
 
 Outputs:
-  - mem JSONL: {"access": "read"|"write", "addr": "0x...", "size": N}
+  - mem JSONL: {"access": "read"|"write", "addr": "0x...", "size": N, "ginsn": N, ...}
+    ginsn: global dynamic instruction index in trace file order, 0-based from first INS,
+    shared across threads; mem events carry the ginsn of the attributing INS.
   - insn trace: "<tid> 0.0: <ip> insn: <bytes...>"
 """
 
@@ -58,7 +60,7 @@ def main() -> int:
         "--insn-out",
         type=Path,
         required=True,
-        help="output insn trace text for recover_mem_addrs.py",
+        help="output insn trace text for recover_mem_addrs_uc",
     )
     args = ap.parse_args()
 
@@ -72,6 +74,9 @@ def main() -> int:
     # Track dynamic instruction index per thread (TID in SDE output).
     # Memory ops are attributed to the most recent INS of the same TID.
     insn_idx_by_tid: dict[int, int] = {}
+    # Monotonic global INS index in file order, 0-based (interleaves threads as in the trace).
+    global_insn = -1
+    last_ginsn_for_tid: dict[int, int] = {}
 
     with args.input.open("r", encoding="utf-8", errors="replace") as fp:
         for line in fp:
@@ -92,6 +97,7 @@ def main() -> int:
                             "size": size,
                             "tid": tid,
                             "insn_idx": insn_idx_by_tid.get(tid, -1),
+                            "ginsn": last_ginsn_for_tid.get(tid, -1),
                         },
                         ensure_ascii=False,
                     )
@@ -115,6 +121,7 @@ def main() -> int:
                             "size": size,
                             "tid": tid,
                             "insn_idx": insn_idx_by_tid.get(tid, -1),
+                            "ginsn": last_ginsn_for_tid.get(tid, -1),
                         },
                         ensure_ascii=False,
                     )
@@ -129,10 +136,12 @@ def main() -> int:
                 raw = m.group("raw")
                 tid_s = m.group("tid")
                 tid = int(tid_s) if tid_s is not None else 0
+                global_insn += 1
+                last_ginsn_for_tid[tid] = global_insn
                 insn_idx_by_tid[tid] = insn_idx_by_tid.get(tid, -1) + 1
                 if raw:
                     spaced = raw_hex_to_spaced_bytes(raw)
-                    # recover_mem_addrs.py expects:
+                    # recover_mem_addrs_uc expects:
                     #   <tid> <time>:      <ip> insn: <hex bytes...>
                     insn_fp.write(f"{tid} 0.0: {ip} insn: {spaced}\n")
                     insn_with_raw += 1
@@ -147,7 +156,7 @@ def main() -> int:
     if insn_events and insn_with_raw == 0:
         print(
             "warning: no raw instruction bytes found in INS lines; "
-            "insn trace for recover_mem_addrs.py was not generated (will be empty)."
+            "insn trace for recover_mem_addrs_uc was not generated (will be empty)."
         )
     elif insn_events:
         print(f"insns with raw bytes: {insn_with_raw}")

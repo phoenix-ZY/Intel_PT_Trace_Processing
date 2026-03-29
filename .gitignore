@@ -64,3 +64,8 @@ perf.data.*
 core
 core.*
 vgcore.*
+
+# Local test files (not for distribution / version control)
+test/
+
+recover_mem_addrs_uc

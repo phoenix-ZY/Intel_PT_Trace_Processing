@@ -18,7 +18,7 @@
    - 把 SDE debugtrace 转成：
      - 真实内存访问流（JSONL）
      - 指令字节流（给 Unicorn 恢复器）
-3. `recover_mem_addrs.py`
+3. `recover_mem_addrs_uc`
    - 从指令字节流推断（虚拟）内存访问地址，输出 JSONL。
 4. `reuse_distance.py`
    - 对内存访问流计算 reuse distance（可对 real/virtual 分别算）。
@@ -37,7 +37,7 @@
     - `*.mem.real.jsonl`（真实地址流）
     - `*.insn.trace.txt`（`<tid> <time>: <ip> insn: ...`）
 
-- `recover_mem_addrs.py`
+- `recover_mem_addrs_uc`
   - 输入：`*.insn.trace.txt` 或同格式 `trace.txt`。
   - 输出：`*.mem.virtual.jsonl`（虚拟恢复地址流）
 
@@ -51,7 +51,7 @@
 
 - `inputs/trace.txt`
   - perf/PT 风格指令 trace（行内有 `insn: xx xx ...`）
-  - 可直接喂给 `recover_mem_addrs.py`
+  - 可直接喂给 `recover_mem_addrs_uc`
 
 - `inputs/sde_mcf.debugtrace.txt`
   - SDE debugtrace（`Read/Write/INS` 交织）
@@ -92,10 +92,10 @@ python3 sde_debugtrace_convert.py \
   --mem-out outputs/mem/mcf.mem.real.jsonl \
   --insn-out intermediate/mcf.insn.trace.txt
 
-python3 recover_mem_addrs.py \
+./recover_mem_addrs_uc \
   -i intermediate/mcf.insn.trace.txt \
   -o outputs/mem/mcf.mem.virtual.jsonl \
-  --minimal --salvage-invalid-mem --salvage-fill-writes --salvage-fill-seed 1
+  --salvage-invalid-mem --salvage-reads --seed 1
 
 python3 reuse_distance.py -i outputs/mem/mcf.mem.real.jsonl --line-size 64 --top 10 --report-out outputs/rd/mcf.rd.real.txt
 python3 reuse_distance.py -i outputs/mem/mcf.mem.virtual.jsonl --line-size 64 --top 10 --report-out outputs/rd/mcf.rd.virtual.txt
