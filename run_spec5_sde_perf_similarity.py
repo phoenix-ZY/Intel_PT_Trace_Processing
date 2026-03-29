@@ -387,16 +387,32 @@ def run_one_case(
     if not sde_trace.exists() or sde_trace.stat().st_size == 0:
         raise RuntimeError("empty SDE trace")
 
+    sde_analyzer = script_dir / "analyze_sde_trace_uc"
+    if not sde_analyzer.exists():
+        raise RuntimeError(f"missing {sde_analyzer}; run build_recover_mem_addrs_uc.sh first")
     run_step(
         [
-            sys.executable,
-            str(script_dir / "sde_debugtrace_convert.py"),
+            str(sde_analyzer),
             "-i",
             str(sde_trace),
             "--mem-out",
             str(sde_mem),
             "--insn-out",
             str(sde_insn),
+            "--inst-analysis-out",
+            str(sde_inst_analysis_json),
+            "--data-analysis-out",
+            str(sde_data_analysis_json),
+            "--analysis-line-size",
+            str(args.line_size),
+            "--analysis-sdp-max-lines",
+            "262144",
+            "--analysis-rd-definition",
+            "stack_depth",
+            "--analysis-rd-hist-cap-lines",
+            str(args.analysis_rd_hist_cap_lines),
+            "--analysis-stride-bin-cap-lines",
+            str(args.analysis_stride_bin_cap_lines),
         ],
         verbose=args.verbose,
     )
@@ -480,6 +496,20 @@ def run_one_case(
         str(args.recover_page_init_seed),
         "--progress-every",
         str(args.recover_progress_every),
+        "--inst-analysis-out",
+        str(perf_inst_analysis_json),
+        "--data-analysis-out",
+        str(perf_data_analysis_json),
+        "--analysis-line-size",
+        str(args.line_size),
+        "--analysis-sdp-max-lines",
+        "262144",
+        "--analysis-rd-definition",
+        "stack_depth",
+        "--analysis-rd-hist-cap-lines",
+        str(args.analysis_rd_hist_cap_lines),
+        "--analysis-stride-bin-cap-lines",
+        str(args.analysis_stride_bin_cap_lines),
     ]
     if args.recover_salvage_invalid_mem:
         recover_cmd.append("--salvage-invalid-mem")
@@ -487,44 +517,8 @@ def run_one_case(
             recover_cmd.append("--salvage-reads")
     run_step(recover_cmd, verbose=args.verbose)
 
-    run_step(
-        [
-            sys.executable,
-            str(script_dir / "analyze_mem_trace_profiles.py"),
-            "--input",
-            str(sde_mem),
-            "--trace-kind",
-            "data",
-            "--line-size",
-            str(args.line_size),
-            "--rd-definition",
-            "stack_depth",
-            "--sdp-max-lines",
-            "262144",
-            "--json-out",
-            str(sde_data_analysis_json),
-        ],
-        verbose=args.verbose,
-    )
-    run_step(
-        [
-            sys.executable,
-            str(script_dir / "analyze_mem_trace_profiles.py"),
-            "--input",
-            str(perf_rec_mem),
-            "--trace-kind",
-            "data",
-            "--line-size",
-            str(args.line_size),
-            "--rd-definition",
-            "stack_depth",
-            "--sdp-max-lines",
-            "262144",
-            "--json-out",
-            str(perf_data_analysis_json),
-        ],
-        verbose=args.verbose,
-    )
+    if not sde_data_analysis_json.exists() or not sde_inst_analysis_json.exists():
+        raise RuntimeError("analyze_sde_trace_uc did not produce SDE analysis JSON outputs")
     run_step(
         [
             sys.executable,
@@ -544,48 +538,8 @@ def run_one_case(
         ],
         verbose=args.verbose,
     )
-    run_step(
-        [
-            sys.executable,
-            str(script_dir / "analyze_mem_trace_profiles.py"),
-            "--input",
-            str(sde_insn),
-            "--input-format",
-            "insn_trace",
-            "--trace-kind",
-            "inst",
-            "--line-size",
-            str(args.line_size),
-            "--rd-definition",
-            "stack_depth",
-            "--sdp-max-lines",
-            "262144",
-            "--json-out",
-            str(sde_inst_analysis_json),
-        ],
-        verbose=args.verbose,
-    )
-    run_step(
-        [
-            sys.executable,
-            str(script_dir / "analyze_mem_trace_profiles.py"),
-            "--input",
-            str(perf_insn),
-            "--input-format",
-            "insn_trace",
-            "--trace-kind",
-            "inst",
-            "--line-size",
-            str(args.line_size),
-            "--rd-definition",
-            "stack_depth",
-            "--sdp-max-lines",
-            "262144",
-            "--json-out",
-            str(perf_inst_analysis_json),
-        ],
-        verbose=args.verbose,
-    )
+    if not perf_data_analysis_json.exists() or not perf_inst_analysis_json.exists():
+        raise RuntimeError("recover_mem_addrs_uc did not produce perf analysis JSON outputs")
     run_step(
         [
             sys.executable,
@@ -647,7 +601,7 @@ def main() -> int:
     ap.add_argument("--total-insns", type=int, default=2_000_000)
     ap.add_argument("--line-size", type=int, default=64)
     ap.add_argument("--stride-top-k", type=int, default=20)
-    ap.add_argument("--perf-record-seconds", type=float, default=0.01)
+    ap.add_argument("--perf-record-seconds", type=float, default=0.001)
     ap.add_argument("--perf-event", type=str, default="intel_pt//u")
     ap.add_argument("--perf-max-insn-lines", type=int, default=500_000)
     ap.add_argument("--trace-post-sde-sleep", type=float, default=8.0)
@@ -671,6 +625,18 @@ def main() -> int:
     ap.add_argument("--recover-salvage-invalid-mem", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--recover-salvage-reads", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--recover-progress-every", type=int, default=0)
+    ap.add_argument(
+        "--analysis-rd-hist-cap-lines",
+        type=int,
+        default=262144,
+        help="cap RD histogram bins above this line distance (0 disables cap)",
+    )
+    ap.add_argument(
+        "--analysis-stride-bin-cap-lines",
+        type=int,
+        default=262144,
+        help="cap stride |delta| bins above this line distance into tail bucket (0 disables cap)",
+    )
     ap.add_argument(
         "--output-base",
         type=Path,
@@ -697,6 +663,10 @@ def main() -> int:
         raise SystemExit("--perf-max-insn-lines must be >= 0")
     if args.recover_page_init_seed < 0:
         raise SystemExit("--recover-page-init-seed must be >= 0")
+    if args.analysis_rd_hist_cap_lines < 0:
+        raise SystemExit("--analysis-rd-hist-cap-lines must be >= 0")
+    if args.analysis_stride_bin_cap_lines < 0:
+        raise SystemExit("--analysis-stride-bin-cap-lines must be >= 0")
     if args.recover_progress_every < 0:
         raise SystemExit("--recover-progress-every must be >= 0")
 

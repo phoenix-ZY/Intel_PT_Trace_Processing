@@ -6,9 +6,9 @@ Current workflow for comparing SPEC traces between:
 - SDE instruction fetch stream
 - perf instruction fetch stream
 
-The project now uses one unified analysis pipeline:
-1. `analyze_mem_trace_profiles.py` analyzes one trace.
-2. `compare_mem_trace_metrics.py` compares two analyzed traces.
+The project now uses one unified analysis schema, produced mainly by C tools:
+1. C path emits per-trace analysis JSON (SDE and perf paths).
+2. `compare_mem_trace_metrics.py` compares two analysis JSON files.
 
 ## Main scripts
 
@@ -20,20 +20,17 @@ The project now uses one unified analysis pipeline:
   - data + instruction locality comparison
   - `summary.json` / `summary.csv` output
 
-- `sde_debugtrace_convert.py`  
-  Converts SDE debugtrace into:
+- `analyze_sde_trace_uc.c` + `build_recover_mem_addrs_uc.sh`  
+  One-pass SDE analyzer for debugtrace input. In a single scan, it can emit:
   - data mem JSONL (`*.sde.mem.real.jsonl`)
   - instruction trace (`*.sde.insn.trace.txt`)
+  - SDE data analysis JSON
+  - SDE instruction analysis JSON
 
 - `recover_mem_addrs_uc.c` + `build_recover_mem_addrs_uc.sh`  
   Unicorn-based C recovery tool that reconstructs memory accesses from
-  instruction trace (`<tid> <time>: <ip> insn: <bytes...>`).
-
-- `analyze_mem_trace_profiles.py`  
-  Single-trace analyzer (data or instruction stream):
-  - Reuse distance histogram (RD)
-  - Stack-distance / miss-ratio curve (SDP/MRC)
-  - Stride distribution and metrics
+  instruction trace (`<tid> <time>: <ip> insn: <bytes...>`). It now also
+  supports one-pass analysis output (instruction + recovered-data profiles).
 
 - `compare_mem_trace_metrics.py`  
   Compares two analysis JSON files:
@@ -76,23 +73,25 @@ python3 run_spec5_sde_perf_similarity.py \
 
 ## Standalone analysis usage
 
-### Analyze one trace
+### Analyze SDE debugtrace in one pass (C)
 
 ```bash
-python3 analyze_mem_trace_profiles.py \
-  --input path/to/trace.jsonl \
-  --trace-kind data \
-  --json-out out.analysis.json
+./analyze_sde_trace_uc \
+  -i path/to/sde.debugtrace.txt \
+  --mem-out out.sde.mem.real.jsonl \
+  --insn-out out.sde.insn.trace.txt \
+  --data-analysis-out out.sde.data.analysis.json \
+  --inst-analysis-out out.sde.inst.analysis.json
 ```
 
-For instruction trace text:
+### Recover perf mem + analyze in one pass (C)
 
 ```bash
-python3 analyze_mem_trace_profiles.py \
-  --input path/to/trace.insn.trace.txt \
-  --input-format insn_trace \
-  --trace-kind inst \
-  --json-out out.inst.analysis.json
+./recover_mem_addrs_uc \
+  -i path/to/perf.insn.trace.txt \
+  -o out.perf.mem.recovered.jsonl \
+  --inst-analysis-out out.perf.inst.analysis.json \
+  --data-analysis-out out.perf.recovered.data.analysis.json
 ```
 
 ### Compare two analyzed traces

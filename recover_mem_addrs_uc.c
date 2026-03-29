@@ -9,6 +9,7 @@
 
 #include <unicorn/unicorn.h>
 #include <unicorn/x86.h>
+#include "trace_feature_core.h"
 
 #define MAX_INSN_BYTES 32
 
@@ -41,6 +42,7 @@ typedef struct {
     uint64_t cur_insn_idx;
     uint64_t mem_read_events;
     uint64_t mem_write_events;
+    TfProfile *data_profile;
 } Ctx;
 
 typedef struct {
@@ -66,6 +68,13 @@ typedef struct {
     const char *report_path;
     const char *invalid_samples_path;
     uint64_t invalid_samples_limit;
+    const char *inst_analysis_path;
+    const char *data_analysis_path;
+    uint64_t analysis_line_size;
+    uint64_t analysis_sdp_max_lines;
+    bool analysis_stack_depth;
+    uint64_t analysis_rd_hist_cap_lines;
+    uint64_t analysis_stride_bin_cap_lines;
     const char *input_path;
     const char *output_path;
 } Opts;
@@ -124,6 +133,14 @@ static uint64_t read_gpr_by_index(uc_engine *uc, int idx) {
 static void emit_mem_event(Ctx *ctx, const char *kind, uint64_t address, int size, bool salvaged) {
     if (!strcmp(kind, "write")) ctx->mem_write_events++;
     else ctx->mem_read_events++;
+    if (ctx->data_profile) {
+        tf_profile_add_data(
+            ctx->data_profile,
+            ctx->cur_tid,
+            address,
+            (!strcmp(kind, "write")) ? TF_ACCESS_WRITE : TF_ACCESS_READ
+        );
+    }
     if (size <= 0) size = 1;
     fprintf(
         ctx->out,
@@ -643,7 +660,14 @@ static void usage(const char *prog) {
         "  --page-size N            default 0x1000\n"
         "  --report-out PATH        optional report JSON path\n"
         "  --invalid-samples-out P  optional invalid sample JSON path\n"
-        "  --invalid-samples-limit N default 2000\n",
+        "  --invalid-samples-limit N default 2000\n"
+        "  --inst-analysis-out PATH optional instruction analysis JSON output\n"
+        "  --data-analysis-out PATH optional recovered-data analysis JSON output\n"
+        "  --analysis-line-size N   default 64\n"
+        "  --analysis-sdp-max-lines N default 262144\n"
+        "  --analysis-rd-definition stack_depth|distinct_since_last  default stack_depth\n"
+        "  --analysis-rd-hist-cap-lines N default 262144 (0 disables cap)\n"
+        "  --analysis-stride-bin-cap-lines N default 262144 (0 disables cap)\n",
         prog
     );
 }
@@ -671,6 +695,13 @@ int main(int argc, char **argv) {
         .report_path = NULL,
         .invalid_samples_path = NULL,
         .invalid_samples_limit = 2000,
+        .inst_analysis_path = NULL,
+        .data_analysis_path = NULL,
+        .analysis_line_size = 64,
+        .analysis_sdp_max_lines = 262144,
+        .analysis_stack_depth = true,
+        .analysis_rd_hist_cap_lines = 262144,
+        .analysis_stride_bin_cap_lines = 262144,
         .input_path = NULL,
         .output_path = NULL,
     };
@@ -749,6 +780,29 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--invalid-samples-limit")) {
             if (++i >= argc) die("missing value for --invalid-samples-limit");
             o.invalid_samples_limit = parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--inst-analysis-out")) {
+            if (++i >= argc) die("missing value for --inst-analysis-out");
+            o.inst_analysis_path = argv[i];
+        } else if (!strcmp(argv[i], "--data-analysis-out")) {
+            if (++i >= argc) die("missing value for --data-analysis-out");
+            o.data_analysis_path = argv[i];
+        } else if (!strcmp(argv[i], "--analysis-line-size")) {
+            if (++i >= argc) die("missing value for --analysis-line-size");
+            o.analysis_line_size = parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--analysis-sdp-max-lines")) {
+            if (++i >= argc) die("missing value for --analysis-sdp-max-lines");
+            o.analysis_sdp_max_lines = parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--analysis-rd-definition")) {
+            if (++i >= argc) die("missing value for --analysis-rd-definition");
+            if (!strcmp(argv[i], "stack_depth")) o.analysis_stack_depth = true;
+            else if (!strcmp(argv[i], "distinct_since_last")) o.analysis_stack_depth = false;
+            else die("invalid --analysis-rd-definition");
+        } else if (!strcmp(argv[i], "--analysis-rd-hist-cap-lines")) {
+            if (++i >= argc) die("missing value for --analysis-rd-hist-cap-lines");
+            o.analysis_rd_hist_cap_lines = parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--analysis-stride-bin-cap-lines")) {
+            if (++i >= argc) die("missing value for --analysis-stride-bin-cap-lines");
+            o.analysis_stride_bin_cap_lines = parse_u64_any(argv[i]);
         } else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage(argv[0]);
             return 0;
@@ -760,6 +814,10 @@ int main(int argc, char **argv) {
 
     if (!o.input_path || !o.output_path) die("input/output required");
     if ((o.page_size & (o.page_size - 1)) != 0) die("page-size must be power of two");
+    if (o.analysis_line_size == 0 || (o.analysis_line_size & (o.analysis_line_size - 1)) != 0) {
+        die("analysis-line-size must be a positive power of two");
+    }
+    if (o.analysis_sdp_max_lines == 0) die("analysis-sdp-max-lines must be > 0");
 
     o.code_limit = o.code_base + o.code_size;
 
@@ -812,7 +870,17 @@ int main(int argc, char **argv) {
         .cur_insn_idx = 0,
         .mem_read_events = 0,
         .mem_write_events = 0,
+        .data_profile = NULL,
     };
+    TfProfile *inst_profile = NULL;
+    if (o.inst_analysis_path) {
+        inst_profile = tf_profile_create(false, o.analysis_line_size, o.analysis_stack_depth);
+        if (!inst_profile) die("oom inst profile");
+    }
+    if (o.data_analysis_path) {
+        ctx.data_profile = tf_profile_create(true, o.analysis_line_size, o.analysis_stack_depth);
+        if (!ctx.data_profile) die("oom data profile");
+    }
     uc_hook hh1, hh2, hh3, hh4, hh5;
     uc_hook_add(uc, &hh1, UC_HOOK_MEM_READ, (void *)hook_mem, &ctx, 1, 0);
     uc_hook_add(uc, &hh2, UC_HOOK_MEM_WRITE, (void *)hook_mem, &ctx, 1, 0);
@@ -865,6 +933,7 @@ int main(int argc, char **argv) {
 
         ctx.cur_tid = prev.tid;
         ctx.cur_insn_idx = executed;
+        if (inst_profile) tf_profile_add_inst(inst_profile, prev.tid, prev.ip);
         uc_reg_write(uc, UC_X86_REG_RIP, &cur_addr);
         e = uc_emu_start(uc, cur_addr, cur_addr + prev.code_len, 0, 1);
         if (e != UC_ERR_OK) {
@@ -918,6 +987,7 @@ int main(int argc, char **argv) {
         uc_mem_write(uc, last_addr, prev.code, prev.code_len);
         ctx.cur_tid = prev.tid;
         ctx.cur_insn_idx = executed;
+        if (inst_profile) tf_profile_add_inst(inst_profile, prev.tid, prev.ip);
         uc_reg_write(uc, UC_X86_REG_RIP, &last_addr);
         e = uc_emu_start(uc, last_addr, last_addr + prev.code_len, 0, 1);
         if (e != UC_ERR_OK) {
@@ -1049,9 +1119,48 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (o.inst_analysis_path && inst_profile) {
+        FILE *fa = fopen(o.inst_analysis_path, "w");
+        if (fa) {
+            tf_profile_write_analysis_json(
+                fa,
+                inst_profile,
+                "inst",
+                "insn_trace",
+                o.input_path,
+                o.analysis_line_size,
+                o.analysis_stack_depth ? "stack_depth" : "distinct_since_last",
+                o.analysis_sdp_max_lines,
+                o.analysis_rd_hist_cap_lines,
+                o.analysis_stride_bin_cap_lines
+            );
+            fclose(fa);
+        }
+    }
+    if (o.data_analysis_path && ctx.data_profile) {
+        FILE *fa = fopen(o.data_analysis_path, "w");
+        if (fa) {
+            tf_profile_write_analysis_json(
+                fa,
+                ctx.data_profile,
+                "data",
+                "mem_jsonl",
+                o.output_path,
+                o.analysis_line_size,
+                o.analysis_stack_depth ? "stack_depth" : "distinct_since_last",
+                o.analysis_sdp_max_lines,
+                o.analysis_rd_hist_cap_lines,
+                o.analysis_stride_bin_cap_lines
+            );
+            fclose(fa);
+        }
+    }
+
     map_free(&ipmap);
     set_free(&pages);
     free(invalid_samples);
+    tf_profile_destroy(inst_profile);
+    tf_profile_destroy(ctx.data_profile);
     uc_close(uc);
     fclose(fin);
     fclose(fout);

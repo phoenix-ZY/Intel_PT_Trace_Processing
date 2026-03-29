@@ -131,12 +131,29 @@ def compare_access(ref: dict, test: dict, top_k: int, max_error_bins: int, sdp_m
     mr_l1 = sum(abs(a - b) for a, b in zip(ref_mr, test_mr)) / max(1, len(capacities))
     mr_max = max(abs(a - b) for a, b in zip(ref_mr, test_mr)) if capacities else 0.0
 
+    def stride_bucket_order_key(s: str) -> tuple[int, int]:
+        if s == "0":
+            return (0, 0)
+        if s == "1":
+            return (1, 1)
+        if s.startswith(">="):
+            try:
+                return (3, int(s[2:]))
+            except ValueError:
+                return (4, 0)
+        if "-" in s:
+            try:
+                return (2, int(s.split("-", 1)[0]))
+            except ValueError:
+                return (4, 0)
+        try:
+            return (2, int(s))
+        except ValueError:
+            return (4, 0)
+
     ref_stride_hist = Counter(ref["stride"]["abs_delta_bucket_histogram"])
     test_stride_hist = Counter(test["stride"]["abs_delta_bucket_histogram"])
-    stride_bins = sorted(
-        set(ref_stride_hist) | set(test_stride_hist),
-        key=lambda s: 0 if s == "0" else 1 if s == "1" else int(s.split("-", 1)[0]),
-    )
+    stride_bins = sorted(set(ref_stride_hist) | set(test_stride_hist), key=stride_bucket_order_key)
     sr = [float(ref_stride_hist.get(b, 0)) for b in stride_bins]
     st = [float(test_stride_hist.get(b, 0)) for b in stride_bins]
     spr = pearson(sr, st)
