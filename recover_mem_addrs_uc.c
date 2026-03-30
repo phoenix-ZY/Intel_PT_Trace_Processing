@@ -40,8 +40,24 @@ typedef struct {
     FILE *out;
     uint32_t cur_tid;
     uint64_t cur_insn_idx;
+    uint64_t cur_ip;
+    const TraceInsn *cur_insn;
+    uint64_t rcx_soft_adjusted;
+    uint64_t rng_state;
+    bool mvs_enable;
+    uint64_t mvs_bound;
+    uint64_t mvs_limit_lines;
+    uint64_t mvs_padding;
+    uint64_t mvs_cursor;
+    U64Map mvs_pc_scope;   // pc -> 0 normal, 1 indirect-like
+    U64Set mvs_seeded_qw;  // seeded 8-byte slots
+    uint64_t mvs_seeded_total;
+    uint64_t mvs_seeded_indirect;
+    uint64_t mvs_seeded_normal;
     uint64_t mem_read_events;
     uint64_t mem_write_events;
+    uint64_t analysis_line_size;
+    bool split_crossline;
     TfProfile *data_profile;
 } Ctx;
 
@@ -58,8 +74,15 @@ typedef struct {
     int seed;
     bool init_random;
     bool init_xmm_random;
+    bool dwt_reg_staging;
+    bool split_crossline;
     int page_init_mode; // 0=zero, 1=random, 2=stable
     int page_init_seed;
+    uint64_t rcx_soft_threshold;
+    bool mvs_enable;
+    uint64_t mvs_bound;
+    uint64_t mvs_limit_lines;
+    uint64_t mvs_padding;
     bool salvage_invalid_mem;
     bool salvage_reads;
     bool cpu_model_set;
@@ -93,6 +116,9 @@ typedef struct {
     size_t code_len;
     uint32_t err_code;
 } InvalidSample;
+
+static void mvs_seed_read_if_needed(Ctx *ctx, uint64_t address, int size);
+static void mvs_mark_written(Ctx *ctx, uint64_t address, int size);
 
 static uint64_t align_down(uint64_t x, uint64_t a) { return x & ~(a - 1); }
 static uint64_t align_up(uint64_t x, uint64_t a) { return (x + (a - 1)) & ~(a - 1); }
@@ -134,12 +160,19 @@ static void emit_mem_event(Ctx *ctx, const char *kind, uint64_t address, int siz
     if (!strcmp(kind, "write")) ctx->mem_write_events++;
     else ctx->mem_read_events++;
     if (ctx->data_profile) {
-        tf_profile_add_data(
-            ctx->data_profile,
-            ctx->cur_tid,
-            address,
-            (!strcmp(kind, "write")) ? TF_ACCESS_WRITE : TF_ACCESS_READ
-        );
+        TfAccessKind ak = (!strcmp(kind, "write")) ? TF_ACCESS_WRITE : TF_ACCESS_READ;
+        if (size <= 0) size = 1;
+        uint64_t line_size = ctx->analysis_line_size ? ctx->analysis_line_size : 64;
+        if (!ctx->split_crossline || ((address & (line_size - 1)) + (uint64_t)size <= line_size)) {
+            tf_profile_add_data(ctx->data_profile, ctx->cur_tid, address, ctx->cur_ip, ak);
+        } else {
+            uint64_t start = address / line_size;
+            uint64_t end = (address + (uint64_t)size - 1) / line_size;
+            for (uint64_t ln = start; ln <= end; ln++) {
+                uint64_t line_addr = ln * line_size;
+                tf_profile_add_data(ctx->data_profile, ctx->cur_tid, line_addr, ctx->cur_ip, ak);
+            }
+        }
     }
     if (size <= 0) size = 1;
     fprintf(
@@ -596,10 +629,128 @@ static void hook_mem(uc_engine *uc, uc_mem_type type, uint64_t address, int size
     (void)value;
     Ctx *ctx = (Ctx *)user_data;
     const char *kind = (type == UC_MEM_WRITE) ? "write" : "read";
+    if (type == UC_MEM_READ) mvs_seed_read_if_needed(ctx, address, size);
+    else if (type == UC_MEM_WRITE) mvs_mark_written(ctx, address, size);
     emit_mem_event(ctx, kind, address, size, false);
 }
 
-static void init_regs(uc_engine *uc, bool random_init, bool random_xmm, int seed, uint64_t stack_top) {
+static uint64_t rng_next_u64(uint64_t *s) {
+    *s = mix64(*s + 0x9e3779b97f4a7c15ULL);
+    return *s;
+}
+
+static uint64_t bounded_lines_addr(uint64_t *s, uint64_t bound, uint64_t lines_mask) {
+    return bound + ((rng_next_u64(s) & lines_mask) << 6);
+}
+
+static uint64_t bounded_small(uint64_t *s, uint64_t limit) {
+    if (limit == 0) return 0;
+    return rng_next_u64(s) % limit;
+}
+
+static bool is_rep_prefixed(const TraceInsn *insn) {
+    if (!insn || insn->code_len == 0) return false;
+    return (insn->code[0] == 0xF3 || insn->code[0] == 0xF2);
+}
+
+static void apply_rcx_soft_threshold(Ctx *ctx, uint64_t threshold, const TraceInsn *insn) {
+    if (!ctx || threshold == 0) return;
+    if (!is_rep_prefixed(insn)) return;
+    uint64_t rcx = 0;
+    uc_reg_read(ctx->uc, UC_X86_REG_RCX, &rcx);
+    if (rcx <= threshold) return;
+    // Soft thresholding: sample around threshold (roughly Gaussian-ish)
+    // and clamp by the smaller of sampled value / original value.
+    uint64_t base = threshold;
+    uint64_t sigma = (threshold / 4) ? (threshold / 4) : 1;
+    uint64_t acc = 0;
+    for (int i = 0; i < 6; i++) acc += bounded_small(&ctx->rng_state, 2 * sigma + 1);
+    uint64_t sampled = base + (acc / 6);
+    if (sampled > rcx) sampled = rcx;
+    uc_reg_write(ctx->uc, UC_X86_REG_RCX, &sampled);
+    ctx->rcx_soft_adjusted++;
+}
+
+static bool looks_like_indirect_load(const TraceInsn *insn, int access_size) {
+    if (!insn || insn->code_len == 0 || access_size < 8) return false;
+    size_t i = 0;
+    while (i < insn->code_len) {
+        uint8_t b = insn->code[i];
+        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3) {
+            i++;
+            continue;
+        }
+        if ((b & 0xF0) == 0x40) { // REX
+            i++;
+            continue;
+        }
+        break;
+    }
+    if (i >= insn->code_len) return false;
+    uint8_t op = insn->code[i];
+    // Common pointer-load forms: mov r64, [mem] and mov r64, moffs64.
+    return (op == 0x8B || op == 0xA1);
+}
+
+static uint64_t mvs_seed_value(Ctx *ctx, uint64_t pc, uint64_t addr, int size) {
+    if (!ctx || !ctx->mvs_enable) return 0;
+    uint64_t scope = 0;
+    if (!map_get(&ctx->mvs_pc_scope, pc, &scope)) {
+        scope = looks_like_indirect_load(ctx->cur_insn, size) ? 1ULL : 0ULL;
+        map_put(&ctx->mvs_pc_scope, pc, scope);
+    }
+    if (scope) {
+        uint64_t lines = ctx->mvs_limit_lines ? ctx->mvs_limit_lines : (1ULL << 20);
+        uint64_t window_bytes = lines << 6;
+        uint64_t disp_hint = addr & 0x38ULL; // keep 8-byte alignment
+        uint64_t line_off = window_bytes ? (ctx->mvs_cursor % window_bytes) : 0;
+        uint64_t v = ctx->mvs_bound + line_off + disp_hint;
+        uint64_t step = (ctx->mvs_padding ? ctx->mvs_padding : 64) + 64;
+        if (window_bytes) ctx->mvs_cursor = (ctx->mvs_cursor + step) % window_bytes;
+        else ctx->mvs_cursor += step;
+        ctx->mvs_seeded_indirect++;
+        return v;
+    }
+    uint64_t lines = ctx->mvs_limit_lines ? ctx->mvs_limit_lines : (1ULL << 20);
+    uint64_t normal_base = ctx->mvs_bound + 0x1000000000ULL;
+    uint64_t v = normal_base + ((rng_next_u64(&ctx->rng_state) % lines) << 6);
+    ctx->mvs_seeded_normal++;
+    return v;
+}
+
+static void mvs_seed_read_if_needed(Ctx *ctx, uint64_t address, int size) {
+    if (!ctx || !ctx->mvs_enable || size <= 0) return;
+    uint64_t start = align_down(address, 8);
+    uint64_t end = align_down(address + (uint64_t)size - 1, 8);
+    for (uint64_t p = start;; p += 8) {
+        if (!set_has(&ctx->mvs_seeded_qw, p)) {
+            uint64_t v = mvs_seed_value(ctx, ctx->cur_ip, p, size);
+            (void)uc_mem_write(ctx->uc, p, &v, sizeof(v));
+            set_add(&ctx->mvs_seeded_qw, p);
+            ctx->mvs_seeded_total++;
+        }
+        if (p == end) break;
+    }
+}
+
+static void mvs_mark_written(Ctx *ctx, uint64_t address, int size) {
+    if (!ctx || !ctx->mvs_enable || size <= 0) return;
+    uint64_t start = align_down(address, 8);
+    uint64_t end = align_down(address + (uint64_t)size - 1, 8);
+    for (uint64_t p = start;; p += 8) {
+        if (!set_has(&ctx->mvs_seeded_qw, p)) set_add(&ctx->mvs_seeded_qw, p);
+        if (p == end) break;
+    }
+}
+
+static void init_regs(
+    uc_engine *uc,
+    bool random_init,
+    bool random_xmm,
+    bool dwt_reg_staging,
+    int seed,
+    uint64_t stack_top
+) {
     int regs[] = {
         UC_X86_REG_RAX, UC_X86_REG_RBX, UC_X86_REG_RCX, UC_X86_REG_RDX,
         UC_X86_REG_RSI, UC_X86_REG_RDI, UC_X86_REG_R8,  UC_X86_REG_R9,
@@ -613,9 +764,26 @@ static void init_regs(uc_engine *uc, bool random_init, bool random_xmm, int seed
         UC_X86_REG_XMM12, UC_X86_REG_XMM13, UC_X86_REG_XMM14, UC_X86_REG_XMM15,
     };
     uint64_t x = (uint64_t)(uint32_t)seed;
+    const uint64_t BOUND = 0x400000000000ULL;
+    const uint64_t BASE_LINES_MASK = ((1ULL << 20) - 1); // 64MB in lines
+    const uint64_t INDEX_LIMIT = (1ULL << 12);           // small index range
     for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
         uint64_t v = 0;
-        if (random_init) {
+        if (random_init && dwt_reg_staging) {
+            int r = regs[i];
+            if (
+                r == UC_X86_REG_RAX || r == UC_X86_REG_RBX || r == UC_X86_REG_RSI || r == UC_X86_REG_RDI ||
+                r == UC_X86_REG_R8 || r == UC_X86_REG_R9 || r == UC_X86_REG_R12 || r == UC_X86_REG_R13 ||
+                r == UC_X86_REG_R14 || r == UC_X86_REG_R15
+            ) {
+                v = bounded_lines_addr(&x, BOUND, BASE_LINES_MASK);
+            } else if (r == UC_X86_REG_RCX) {
+                // Keep RCX in a moderate range for rep-prefixed behavior.
+                v = 1 + bounded_small(&x, 256);
+            } else {
+                v = bounded_small(&x, INDEX_LIMIT);
+            }
+        } else if (random_init) {
             x = mix64(x + 0x9e3779b97f4a7c15ULL + (uint64_t)i);
             v = x;
         }
@@ -646,9 +814,15 @@ static void usage(const char *prog) {
         "  --skip-insns N           default 0\n"
         "  --progress-every N       default 0 (disabled)\n"
         "  --init-regs zero|random  default random\n"
+        "  --reg-staging legacy|dwt default dwt\n"
         "  --init-xmm zero|random   default random\n"
-        "  --page-init zero|random|stable  default stable (for newly mapped pages)\n"
+        "  --page-init zero|random|stable  default zero (for newly mapped pages)\n"
         "  --page-init-seed N       default --seed\n"
+        "  --rcx-soft-threshold N   default 128 (0 disables)\n"
+        "  --mvs on|off             default on\n"
+        "  --mvs-bound N            default 0x400000000000\n"
+        "  --mvs-limit-lines N      default 1048576\n"
+        "  --mvs-padding N          default 64\n"
         "  --salvage-invalid-mem    decode some invalid SIMD insns and emit synthetic mem events\n"
         "  --salvage-reads          when salvage is enabled, emit synthetic reads (default off)\n"
         "  --seed N                 default 1\n"
@@ -667,6 +841,7 @@ static void usage(const char *prog) {
         "  --analysis-sdp-max-lines N default 262144\n"
         "  --analysis-rd-definition stack_depth|distinct_since_last  default stack_depth\n"
         "  --analysis-rd-hist-cap-lines N default 262144 (0 disables cap)\n"
+        "  --split-crossline on|off  default on (split memory ops spanning multiple cache lines)\n"
         "  --analysis-stride-bin-cap-lines N default 262144 (0 disables cap)\n",
         prog
     );
@@ -685,8 +860,15 @@ int main(int argc, char **argv) {
         .seed = 1,
         .init_random = true,
         .init_xmm_random = true,
-        .page_init_mode = PAGE_INIT_STABLE,
+        .dwt_reg_staging = true,
+        .split_crossline = true,
+        .page_init_mode = PAGE_INIT_ZERO,
         .page_init_seed = 1,
+        .rcx_soft_threshold = 128,
+        .mvs_enable = true,
+        .mvs_bound = 0x400000000000ULL,
+        .mvs_limit_lines = (1ULL << 20),
+        .mvs_padding = 64,
         .salvage_invalid_mem = false,
         .salvage_reads = false,
         .cpu_model_set = false,
@@ -735,6 +917,11 @@ int main(int argc, char **argv) {
             if (!strcmp(argv[i], "zero")) o.init_xmm_random = false;
             else if (!strcmp(argv[i], "random")) o.init_xmm_random = true;
             else die("invalid --init-xmm");
+        } else if (!strcmp(argv[i], "--reg-staging")) {
+            if (++i >= argc) die("missing value for --reg-staging");
+            if (!strcmp(argv[i], "legacy")) o.dwt_reg_staging = false;
+            else if (!strcmp(argv[i], "dwt")) o.dwt_reg_staging = true;
+            else die("invalid --reg-staging");
         } else if (!strcmp(argv[i], "--page-init")) {
             if (++i >= argc) die("missing value for --page-init");
             if (!strcmp(argv[i], "zero")) o.page_init_mode = PAGE_INIT_ZERO;
@@ -744,6 +931,23 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--page-init-seed")) {
             if (++i >= argc) die("missing value for --page-init-seed");
             o.page_init_seed = (int)parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--rcx-soft-threshold")) {
+            if (++i >= argc) die("missing value for --rcx-soft-threshold");
+            o.rcx_soft_threshold = parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--mvs")) {
+            if (++i >= argc) die("missing value for --mvs");
+            if (!strcmp(argv[i], "on")) o.mvs_enable = true;
+            else if (!strcmp(argv[i], "off")) o.mvs_enable = false;
+            else die("invalid --mvs");
+        } else if (!strcmp(argv[i], "--mvs-bound")) {
+            if (++i >= argc) die("missing value for --mvs-bound");
+            o.mvs_bound = parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--mvs-limit-lines")) {
+            if (++i >= argc) die("missing value for --mvs-limit-lines");
+            o.mvs_limit_lines = parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--mvs-padding")) {
+            if (++i >= argc) die("missing value for --mvs-padding");
+            o.mvs_padding = parse_u64_any(argv[i]);
         } else if (!strcmp(argv[i], "--cpu-model")) {
             if (++i >= argc) die("missing value for --cpu-model");
             int m = parse_x86_cpu_model(argv[i]);
@@ -800,6 +1004,11 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--analysis-rd-hist-cap-lines")) {
             if (++i >= argc) die("missing value for --analysis-rd-hist-cap-lines");
             o.analysis_rd_hist_cap_lines = parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--split-crossline")) {
+            if (++i >= argc) die("missing value for --split-crossline");
+            if (!strcmp(argv[i], "on")) o.split_crossline = true;
+            else if (!strcmp(argv[i], "off")) o.split_crossline = false;
+            else die("invalid --split-crossline (use on|off)");
         } else if (!strcmp(argv[i], "--analysis-stride-bin-cap-lines")) {
             if (++i >= argc) die("missing value for --analysis-stride-bin-cap-lines");
             o.analysis_stride_bin_cap_lines = parse_u64_any(argv[i]);
@@ -818,6 +1027,7 @@ int main(int argc, char **argv) {
         die("analysis-line-size must be a positive power of two");
     }
     if (o.analysis_sdp_max_lines == 0) die("analysis-sdp-max-lines must be > 0");
+    if (o.mvs_enable && o.mvs_limit_lines == 0) die("mvs-limit-lines must be > 0 when mvs is on");
 
     o.code_limit = o.code_base + o.code_size;
 
@@ -842,7 +1052,7 @@ int main(int argc, char **argv) {
     e = uc_mem_map(uc, stack_base, stack_size, UC_PROT_ALL);
     if (e != UC_ERR_OK) die("uc_mem_map stack failed");
     uint64_t stack_top = stack_base + stack_size - 8;
-    init_regs(uc, o.init_random, o.init_xmm_random, o.seed, stack_top);
+    init_regs(uc, o.init_random, o.init_xmm_random, o.dwt_reg_staging, o.seed, stack_top);
 
     U64Map ipmap;
     map_init(&ipmap, 1 << 16);
@@ -868,17 +1078,30 @@ int main(int argc, char **argv) {
         .out = fout,
         .cur_tid = 0,
         .cur_insn_idx = 0,
+        .cur_ip = 0,
+        .cur_insn = NULL,
+        .rcx_soft_adjusted = 0,
+        .rng_state = mix64((uint64_t)(uint32_t)o.seed ^ 0x726378736f6674ULL),
+        .mvs_enable = o.mvs_enable,
+        .mvs_bound = o.mvs_bound,
+        .mvs_limit_lines = o.mvs_limit_lines,
+        .mvs_padding = o.mvs_padding,
+        .mvs_cursor = 0,
         .mem_read_events = 0,
         .mem_write_events = 0,
+        .analysis_line_size = o.analysis_line_size,
+        .split_crossline = o.split_crossline,
         .data_profile = NULL,
     };
+    map_init(&ctx.mvs_pc_scope, 1 << 12);
+    set_init(&ctx.mvs_seeded_qw, 1 << 14);
     TfProfile *inst_profile = NULL;
     if (o.inst_analysis_path) {
         inst_profile = tf_profile_create(false, o.analysis_line_size, o.analysis_stack_depth);
         if (!inst_profile) die("oom inst profile");
     }
     if (o.data_analysis_path) {
-        ctx.data_profile = tf_profile_create(true, o.analysis_line_size, o.analysis_stack_depth);
+        ctx.data_profile = tf_profile_create(false, o.analysis_line_size, o.analysis_stack_depth);
         if (!ctx.data_profile) die("oom data profile");
     }
     uc_hook hh1, hh2, hh3, hh4, hh5;
@@ -933,8 +1156,11 @@ int main(int argc, char **argv) {
 
         ctx.cur_tid = prev.tid;
         ctx.cur_insn_idx = executed;
+        ctx.cur_ip = prev.ip;
+        ctx.cur_insn = &prev;
         if (inst_profile) tf_profile_add_inst(inst_profile, prev.tid, prev.ip);
         uc_reg_write(uc, UC_X86_REG_RIP, &cur_addr);
+        apply_rcx_soft_threshold(&ctx, o.rcx_soft_threshold, &prev);
         e = uc_emu_start(uc, cur_addr, cur_addr + prev.code_len, 0, 1);
         if (e != UC_ERR_OK) {
             emu_errors++;
@@ -987,8 +1213,11 @@ int main(int argc, char **argv) {
         uc_mem_write(uc, last_addr, prev.code, prev.code_len);
         ctx.cur_tid = prev.tid;
         ctx.cur_insn_idx = executed;
+        ctx.cur_ip = prev.ip;
+        ctx.cur_insn = &prev;
         if (inst_profile) tf_profile_add_inst(inst_profile, prev.tid, prev.ip);
         uc_reg_write(uc, UC_X86_REG_RIP, &last_addr);
+        apply_rcx_soft_threshold(&ctx, o.rcx_soft_threshold, &prev);
         e = uc_emu_start(uc, last_addr, last_addr + prev.code_len, 0, 1);
         if (e != UC_ERR_OK) {
             emu_errors++;
@@ -1036,6 +1265,16 @@ int main(int argc, char **argv) {
         emu_errors,
         invalid_insn_errors
     );
+    fprintf(stderr, "dwt: rcx_soft_adjusted=%" PRIu64 "\n", ctx.rcx_soft_adjusted);
+    if (ctx.mvs_enable) {
+        fprintf(
+            stderr,
+            "dwt: mvs_seeded_total=%" PRIu64 " indirect=%" PRIu64 " normal=%" PRIu64 "\n",
+            ctx.mvs_seeded_total,
+            ctx.mvs_seeded_indirect,
+            ctx.mvs_seeded_normal
+        );
+    }
 
     if (o.report_path) {
         FILE *fr = fopen(o.report_path, "w");
@@ -1054,6 +1293,10 @@ int main(int argc, char **argv) {
                 "  \"emu_errors\": %" PRIu64 ",\n"
                 "  \"invalid_insn_errors\": %" PRIu64 ",\n"
                 "  \"salvaged_invalid_insns\": %" PRIu64 ",\n"
+                "  \"rcx_soft_adjusted\": %" PRIu64 ",\n"
+                "  \"mvs_seeded_total\": %" PRIu64 ",\n"
+                "  \"mvs_seeded_indirect\": %" PRIu64 ",\n"
+                "  \"mvs_seeded_normal\": %" PRIu64 ",\n"
                 "  \"invalid_samples_written\": %" PRIu64 "\n"
                 "}\n",
                 o.input_path,
@@ -1067,6 +1310,10 @@ int main(int argc, char **argv) {
                 emu_errors,
                 invalid_insn_errors,
                 salvaged_invalid_insns,
+                ctx.rcx_soft_adjusted,
+                ctx.mvs_seeded_total,
+                ctx.mvs_seeded_indirect,
+                ctx.mvs_seeded_normal,
                 invalid_samples_cnt
             );
             fclose(fr);
@@ -1158,6 +1405,8 @@ int main(int argc, char **argv) {
 
     map_free(&ipmap);
     set_free(&pages);
+    map_free(&ctx.mvs_pc_scope);
+    set_free(&ctx.mvs_seeded_qw);
     free(invalid_samples);
     tf_profile_destroy(inst_profile);
     tf_profile_destroy(ctx.data_profile);

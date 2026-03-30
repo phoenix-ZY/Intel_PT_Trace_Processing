@@ -1,3 +1,3 @@
 Pin: pin-3.31-98873-b517d2ab2
 Copyright 2002-2025 Intel Corporation.
-E:  The main thread of the application is a zombie thread. Pin can't attach to an application which its main thread is a zombie thread 
+E:  Could not attach to process 1603258: need execute and read access to /proc/1603258/exe, errno=Permission denied

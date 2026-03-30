@@ -69,3 +69,9 @@ vgcore.*
 test/
 
 recover_mem_addrs_uc
+analyze_sde_trace_uc
+
+www
+
+certs
+

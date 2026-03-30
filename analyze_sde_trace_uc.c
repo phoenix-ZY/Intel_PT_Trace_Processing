@@ -13,6 +13,7 @@ typedef struct {
     uint32_t tid;
     uint64_t insn_idx;
     uint64_t last_ginsn;
+    uint64_t last_ip;
     bool has_insn;
 } TidState;
 
@@ -29,6 +30,7 @@ typedef struct {
     const char *inst_analysis_path;
     const char *data_analysis_path;
     uint64_t analysis_line_size;
+    bool split_crossline;
     uint64_t analysis_sdp_max_lines;
     bool analysis_stack_depth;
     uint64_t analysis_rd_hist_cap_lines;
@@ -63,6 +65,7 @@ static TidState *tid_table_get_or_create(TidTable *t, uint32_t tid) {
     s->tid = tid;
     s->insn_idx = 0;
     s->last_ginsn = 0;
+    s->last_ip = 0;
     s->has_insn = false;
     return s;
 }
@@ -77,6 +80,7 @@ static void usage(const char *prog) {
         "  --inst-analysis-out PATH optional instruction analysis JSON output\n"
         "  --data-analysis-out PATH optional data analysis JSON output\n"
         "  --analysis-line-size N   default 64\n"
+        "  --split-crossline on|off default on (split memory ops spanning multiple cache lines)\n"
         "  --analysis-sdp-max-lines N default 262144\n"
         "  --analysis-rd-definition stack_depth|distinct_since_last (default stack_depth)\n"
         "  --analysis-rd-hist-cap-lines N default 262144 (0 disables cap)\n"
@@ -175,6 +179,7 @@ int main(int argc, char **argv) {
         .inst_analysis_path = NULL,
         .data_analysis_path = NULL,
         .analysis_line_size = 64,
+        .split_crossline = true,
         .analysis_sdp_max_lines = 262144,
         .analysis_stack_depth = true,
         .analysis_rd_hist_cap_lines = 262144,
@@ -200,6 +205,11 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "--analysis-line-size")) {
             if (++i >= argc) die("missing value for --analysis-line-size");
             o.analysis_line_size = parse_u64_any(argv[i]);
+        } else if (!strcmp(argv[i], "--split-crossline")) {
+            if (++i >= argc) die("missing value for --split-crossline");
+            if (!strcmp(argv[i], "on")) o.split_crossline = true;
+            else if (!strcmp(argv[i], "off")) o.split_crossline = false;
+            else die("invalid --split-crossline (use on|off)");
         } else if (!strcmp(argv[i], "--analysis-sdp-max-lines")) {
             if (++i >= argc) die("missing value for --analysis-sdp-max-lines");
             o.analysis_sdp_max_lines = parse_u64_any(argv[i]);
@@ -252,7 +262,7 @@ int main(int argc, char **argv) {
         if (!inst_prof) die("oom inst profile");
     }
     if (o.data_analysis_path) {
-        data_prof = tf_profile_create(true, o.analysis_line_size, o.analysis_stack_depth);
+        data_prof = tf_profile_create(false, o.analysis_line_size, o.analysis_stack_depth);
         if (!data_prof) die("oom data profile");
     }
 
@@ -294,12 +304,18 @@ int main(int argc, char **argv) {
                 );
             }
             if (data_prof) {
-                tf_profile_add_data(
-                    data_prof,
-                    tid,
-                    addr,
-                    (!strncmp(p, "Write ", 6)) ? TF_ACCESS_WRITE : TF_ACCESS_READ
-                );
+                TfAccessKind ak = (!strncmp(p, "Write ", 6)) ? TF_ACCESS_WRITE : TF_ACCESS_READ;
+                if (!o.split_crossline ||
+                    ((addr & (o.analysis_line_size - 1)) + (uint64_t)size <= o.analysis_line_size)) {
+                    tf_profile_add_data(data_prof, tid, addr, st->has_insn ? st->last_ip : 0, ak);
+                } else {
+                    uint64_t start = addr / o.analysis_line_size;
+                    uint64_t end = (addr + (uint64_t)size - 1) / o.analysis_line_size;
+                    for (uint64_t ln = start; ln <= end; ln++) {
+                        uint64_t line_addr = ln * o.analysis_line_size;
+                        tf_profile_add_data(data_prof, tid, line_addr, st->has_insn ? st->last_ip : 0, ak);
+                    }
+                }
             }
             mem_events++;
             continue;
@@ -314,6 +330,7 @@ int main(int argc, char **argv) {
             else st->insn_idx += 1;
             st->has_insn = true;
             st->last_ginsn = global_insn;
+            st->last_ip = ip;
             global_insn++;
             insn_events++;
             if (has_raw) {

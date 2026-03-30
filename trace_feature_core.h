@@ -23,7 +23,7 @@ TfProfile *tf_profile_create(bool with_rw, uint64_t line_size, bool rd_stack_dep
 void tf_profile_destroy(TfProfile *p);
 
 void tf_profile_add_inst(TfProfile *p, uint32_t tid, uint64_t ip);
-void tf_profile_add_data(TfProfile *p, uint32_t tid, uint64_t addr, TfAccessKind kind);
+void tf_profile_add_data(TfProfile *p, uint32_t tid, uint64_t addr, uint64_t pc, TfAccessKind kind);
 
 int tf_profile_write_analysis_json(
     FILE *out,

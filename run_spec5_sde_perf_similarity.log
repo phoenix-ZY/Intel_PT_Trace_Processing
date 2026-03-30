@@ -1,0 +1,159 @@
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+Can't open display 
+[batch] benches=10 warmups=[10.0, 20.0]
+[plan] runnable_cases=20
+[trace 1/20] bench=505.mcf_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/505.mcf_r/10s
+[trace 2/20] bench=505.mcf_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/505.mcf_r/20s
+[trace 3/20] bench=520.omnetpp_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/520.omnetpp_r/10s
+[trace 4/20] bench=520.omnetpp_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/520.omnetpp_r/20s
+[trace 5/20] bench=523.xalancbmk_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/523.xalancbmk_r/10s
+[trace 6/20] bench=523.xalancbmk_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/523.xalancbmk_r/20s
+[trace 7/20] bench=541.leela_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/541.leela_r/10s
+[trace 8/20] bench=541.leela_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/541.leela_r/20s
+[trace 9/20] bench=548.exchange2_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/548.exchange2_r/10s
+[trace 10/20] bench=548.exchange2_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/548.exchange2_r/20s
+[trace 11/20] bench=531.deepsjeng_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/531.deepsjeng_r/10s
+[trace 12/20] bench=531.deepsjeng_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/531.deepsjeng_r/20s
+[trace 13/20] bench=557.xz_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/557.xz_r/10s
+[trace 14/20] bench=557.xz_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/557.xz_r/20s
+[trace 15/20] bench=500.perlbench_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/500.perlbench_r/10s
+[trace 16/20] bench=500.perlbench_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/500.perlbench_r/20s
+[trace 17/20] bench=525.x264_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/525.x264_r/10s
+[trace 18/20] bench=525.x264_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/525.x264_r/20s
+[trace 19/20] bench=502.gcc_r warmup=10s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/502.gcc_r/10s
+[trace 20/20] bench=502.gcc_r warmup=20s
+  traced: perf_insn_lines=1000000 out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/502.gcc_r/20s
+[post] cases=20 workers=8
+[post 1/20] bench=505.mcf_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=0 pt_trace_err=0 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/505.mcf_r/20s
+[post 2/20] bench=523.xalancbmk_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/523.xalancbmk_r/10s
+[post 3/20] bench=523.xalancbmk_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/523.xalancbmk_r/20s
+[post 4/20] bench=548.exchange2_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/548.exchange2_r/10s
+[post 5/20] bench=541.leela_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/541.leela_r/20s
+[post 6/20] bench=505.mcf_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/505.mcf_r/10s
+[post 7/20] bench=531.deepsjeng_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=0 pt_trace_err=0 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/531.deepsjeng_r/20s
+[post 8/20] bench=531.deepsjeng_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/531.deepsjeng_r/10s
+[post 9/20] bench=548.exchange2_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/548.exchange2_r/20s
+[post 10/20] bench=520.omnetpp_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/520.omnetpp_r/20s
+[post 11/20] bench=557.xz_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=0 pt_trace_err=0 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/557.xz_r/10s
+[post 12/20] bench=557.xz_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/557.xz_r/20s
+[post 13/20] bench=500.perlbench_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/500.perlbench_r/20s
+[post 14/20] bench=525.x264_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/525.x264_r/20s
+[post 15/20] bench=525.x264_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/525.x264_r/10s
+[post 16/20] bench=520.omnetpp_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/520.omnetpp_r/10s
+[post 17/20] bench=500.perlbench_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/500.perlbench_r/10s
+[post 18/20] bench=541.leela_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/541.leela_r/10s
+[post 19/20] bench=502.gcc_r warmup=10s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/502.gcc_r/10s
+[post 20/20] bench=502.gcc_r warmup=20s
+  ok: mode=perf-only perf_insn_lines=1000000 pt_aux_lost=1 pt_trace_err=1 inst_analysis= data_analysis= out=/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/502.gcc_r/20s
+[warmup] bench=500.perlbench_r data_ref_pairs=1 mean_cos=0.9956
+[warmup] bench=502.gcc_r data_ref_pairs=1 mean_cos=0.9951
+[warmup] bench=505.mcf_r data_ref_pairs=1 mean_cos=0.9860
+[warmup] bench=520.omnetpp_r data_ref_pairs=1 mean_cos=0.9999
+[warmup] bench=523.xalancbmk_r data_ref_pairs=1 mean_cos=0.9989
+[warmup] bench=525.x264_r data_ref_pairs=1 mean_cos=0.9975
+[warmup] bench=531.deepsjeng_r data_ref_pairs=1 mean_cos=0.9999
+[warmup] bench=541.leela_r data_ref_pairs=1 mean_cos=1.0000
+[warmup] bench=548.exchange2_r data_ref_pairs=1 mean_cos=0.9998
+[warmup] bench=557.xz_r data_ref_pairs=1 mean_cos=0.9962
+
+[done] ok=20 error=0
+  summary json: /home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/summary.json
+  summary csv:  /home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/summary.csv
+  warmup pairwise json: /home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/warmup_pairwise_similarity.json
+  warmup pairwise csv:  /home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_full_2warmups/warmup_pairwise_similarity.csv
