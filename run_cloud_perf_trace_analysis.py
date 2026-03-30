@@ -7,9 +7,9 @@ classic benchmark configuration inside Docker, a bench-client (and ephemeral
 MySQL client for mysqlslap), and Intel PT traces from a single worker thread.
 
 After each configuration, runs the same perf-only pipeline as
-run_spec5_sde_perf_similarity.py (with --no-enable-sde): perf script decode,
-instruction-trace extraction, memory recovery via recover_mem_addrs_uc, and
-data/inst locality JSON reports. SDE is not used.
+run_spec5_perf_trace_analysis.py (SPEC) / run_spec5_sde_perf_similarity.py --no-enable-sde:
+perf script decode, instruction-trace extraction, memory recovery via recover_mem_addrs_uc,
+and data/inst locality JSON reports. SDE is not used.
 
 Trace file naming (unchanged):
     perf.<service>.<config>.<sample_index>.data
@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -36,12 +37,10 @@ import time
 from pathlib import Path
 import shutil
 
-# Reuse perf post steps from the SPEC batch driver (perf-only path).
-from run_spec5_sde_perf_similarity import (
-    extract_perf_insn_trace,
-    parse_perf_script_health,
-    run_step,
-)
+import analyze_insn_trace_portrait as insn_portrait
+
+from perf_pipeline import perf_postprocess_one
+from perf_pipeline import add_perf_postprocess_args, validate_perf_postprocess_args
 
 # ─── Defaults ────────────────────────────────────────────────────────────────
 
@@ -574,92 +573,65 @@ def cloud_run_perf_postprocess(
     for sample_idx, perf_data in data_files:
         prefix = f"{slug}_s{sample_idx}"
         perf_data_copy = intermediate / f"{prefix}.perf.data"
-        perf_script = intermediate / f"{prefix}.perf.script.txt"
-        perf_script_stderr = report_dir / f"{prefix}.perf.script.stderr.txt"
-        perf_insn = intermediate / f"{prefix}.perf.insn.trace.txt"
-        perf_rec_mem = mem_dir / f"{prefix}.perf.mem.recovered.jsonl"
-        perf_data_analysis = report_dir / f"{prefix}.perf.recovered.data.analysis.json"
-        perf_inst_analysis = report_dir / f"{prefix}.perf.inst.analysis.json"
 
         # Always refresh copy so re-collected perf.data replaces stale files.
         shutil.copy2(perf_data, perf_data_copy)
 
-        log("📜", f"Post-process sample {sample_idx}: perf script → insn trace …")
-        run_step(
-            [
-                str(perf_tool),
-                "script",
-                "--insn-trace",
-                "-F",
-                "tid,time,ip,insn,ipc",
-                "-i",
-                str(perf_data_copy),
-            ],
+        log("📜", f"Post-process sample {sample_idx}: perf script → extract → recover_mem_addrs_uc …")
+        aux_lost, trace_err, ninsn, _, perf_rec_mem, perf_data_analysis, perf_inst_analysis, portrait_txt = perf_postprocess_one(
+            script_dir=script_dir,
+            perf_tool=perf_tool,
+            perf_data=perf_data_copy,
+            prefix=prefix,
+            intermediate_dir=intermediate,
+            mem_dir=mem_dir,
+            report_dir=report_dir,
+            perf_max_insn_lines=args.perf_max_insn_lines,
+            line_size=args.line_size,
+            analysis_rd_hist_cap_lines=args.analysis_rd_hist_cap_lines,
+            analysis_stride_bin_cap_lines=args.analysis_stride_bin_cap_lines,
+            recover_init_regs=args.recover_init_regs,
+            recover_reg_staging=args.recover_reg_staging,
+            recover_mvs=args.recover_mvs,
+            recover_fill_seed=args.recover_fill_seed,
+            recover_page_init=args.recover_page_init,
+            recover_page_init_seed=args.recover_page_init_seed,
+            recover_progress_every=args.recover_progress_every,
+            recover_salvage_invalid_mem=args.recover_salvage_invalid_mem,
+            recover_salvage_reads=args.recover_salvage_reads,
+            insn_portrait=getattr(args, "insn_portrait", True),
             verbose=args.verbose_post,
-            stdout_path=perf_script,
-            stderr_path=perf_script_stderr,
         )
-        aux_lost, trace_err = parse_perf_script_health(perf_script_stderr)
-        ninsn = extract_perf_insn_trace(perf_script, perf_insn, args.perf_max_insn_lines)
-        try:
-            perf_script.unlink()
-        except FileNotFoundError:
-            pass
-        if ninsn < 1:
-            raise RuntimeError(
-                f"no insn lines extracted for {perf_data.name} "
-                f"(aux_lost={aux_lost}, trace_errors={trace_err})"
-            )
 
-        recover_cmd = [
-            str(recover_bin),
-            "-i",
-            str(perf_insn),
-            "-o",
-            str(perf_rec_mem),
-            "--init-regs",
-            args.recover_init_regs,
-            "--reg-staging",
-            args.recover_reg_staging,
-            "--mvs",
-            args.recover_mvs,
-            "--seed",
-            str(args.recover_fill_seed),
-            "--page-init",
-            args.recover_page_init,
-            "--page-init-seed",
-            str(args.recover_page_init_seed),
-            "--progress-every",
-            str(args.recover_progress_every),
-            "--inst-analysis-out",
-            str(perf_inst_analysis),
-            "--data-analysis-out",
-            str(perf_data_analysis),
-            "--analysis-line-size",
-            str(args.line_size),
-            "--analysis-sdp-max-lines",
-            "262144",
-            "--analysis-rd-definition",
-            "stack_depth",
-            "--analysis-rd-hist-cap-lines",
-            str(args.analysis_rd_hist_cap_lines),
-            "--analysis-stride-bin-cap-lines",
-            str(args.analysis_stride_bin_cap_lines),
-        ]
-        if args.recover_salvage_invalid_mem:
-            recover_cmd.append("--salvage-invalid-mem")
-            if args.recover_salvage_reads:
-                recover_cmd.append("--salvage-reads")
-
-        log("🔬", f"Post-process sample {sample_idx}: recover_mem_addrs_uc ({ninsn} insn lines) …")
-        run_step(recover_cmd, verbose=args.verbose_post)
-
-        if not perf_data_analysis.is_file() or not perf_inst_analysis.is_file():
-            raise RuntimeError("recover_mem_addrs_uc did not write analysis JSON outputs")
-
+        if getattr(args, "insn_portrait", True) and portrait_txt is not None and portrait_txt.is_file() and portrait_txt.stat().st_size > 0:
+            max_p = args.perf_max_insn_lines if args.perf_max_insn_lines > 0 else 0
+            rep = insn_portrait.analyze_file(portrait_txt, max_insns=max_p)
+            rep["input_path"] = str(portrait_txt.resolve())
+            insn_portrait_json = report_dir / f"{prefix}.insn.portrait.json"
+            insn_portrait_json.write_text(json.dumps(rep, indent=2, ensure_ascii=False), encoding="utf-8")
+            # Free space: portrait trace text can be large; JSON is the stable artifact.
+            try:
+                portrait_txt.unlink()
+            except FileNotFoundError:
+                pass
+            trace_profile_merged_json = report_dir / f"{prefix}.trace_profile.merged.json"
+            merged = {
+                "schema": "trace-profile-v1",
+                "bench": bench_name,
+                "sample_index": sample_idx,
+                "paths": {
+                    "perf_data_copy": str(perf_data_copy),
+                    "perf_recovered_mem_jsonl": str(perf_rec_mem),
+                    "perf_data_analysis_json": str(perf_data_analysis),
+                    "perf_inst_analysis_json": str(perf_inst_analysis),
+                    "insn_portrait_json": str(insn_portrait_json),
+                },
+                "insn_portrait": rep,
+            }
+            trace_profile_merged_json.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
         log(
             "✅",
-            f"Sample {sample_idx}: data={perf_data_analysis.name} inst={perf_inst_analysis.name} "
+            f"Sample {sample_idx}: data={Path(perf_data_analysis).name} inst={Path(perf_inst_analysis).name} "
             f"(pt_aux_lost={aux_lost}, pt_trace_err={trace_err})",
         )
 
@@ -987,29 +959,13 @@ def main():
         action="store_true",
         help="Stream MySQL sysbench oltp_read_write prepare to terminal (default: capture, log last lines + duration)",
     )
-    parser.add_argument("--perf-max-insn-lines", type=int, default=500_000,
-                        help="Max insn lines to keep from perf script (0 = unlimited)")
-    parser.add_argument("--line-size", type=int, default=64,
-                        help="Cache line size for locality analysis (power of two)")
-    parser.add_argument("--recover-init-regs", choices=["zero", "random"], default="random")
-    parser.add_argument("--recover-reg-staging", choices=["legacy", "dwt"], default="dwt")
-    parser.add_argument("--recover-mvs", choices=["on", "off"], default="on")
-    parser.add_argument("--recover-fill-seed", type=int, default=1)
-    parser.add_argument("--recover-page-init", choices=["zero", "random", "stable"], default="zero")
-    parser.add_argument("--recover-page-init-seed", type=int, default=1)
-    parser.add_argument("--recover-progress-every", type=int, default=0)
     parser.add_argument(
-        "--recover-salvage-invalid-mem",
+        "--export-full-features",
         action=argparse.BooleanOptionalAction,
         default=True,
+        help="After the full run, export perf_full_features.(csv/xlsx) under output dir.",
     )
-    parser.add_argument(
-        "--recover-salvage-reads",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument("--analysis-rd-hist-cap-lines", type=int, default=262144)
-    parser.add_argument("--analysis-stride-bin-cap-lines", type=int, default=262144)
+    add_perf_postprocess_args(parser)
     parser.add_argument(
         "--perf-mmap-pages",
         type=str,
@@ -1032,15 +988,7 @@ def main():
         args.perf_mmap_pages = normalize_perf_mmap_pages(args.perf_mmap_pages)
     except ValueError as e:
         sys.exit(f"❌ --perf-mmap-pages: {e}")
-
-    if args.line_size <= 0 or (args.line_size & (args.line_size - 1)) != 0:
-        sys.exit("❌ --line-size must be a positive power of two")
-    if args.perf_max_insn_lines < 0:
-        sys.exit("❌ --perf-max-insn-lines must be >= 0")
-    if args.analysis_rd_hist_cap_lines < 0 or args.analysis_stride_bin_cap_lines < 0:
-        sys.exit("❌ analysis cap lines must be >= 0")
-    if args.recover_progress_every < 0:
-        sys.exit("❌ --recover-progress-every must be >= 0")
+    validate_perf_postprocess_args(args)
 
     output_dir = args.output_dir.resolve()
     perf_tool = args.perf_tool.resolve()
@@ -1111,6 +1059,16 @@ def main():
     run_cmd(["docker", "network", "rm", NETWORK_NAME])
 
     print(f"\n🎉 All cloud benchmarks finished! Data saved to: {output_dir}")
+    if args.export_full_features:
+        exporter = (SCRIPT_DIR / "export_perf_full_features.py").resolve()
+        try:
+            subprocess.run(
+                [sys.executable, str(exporter), "--output-base", str(output_dir)],
+                check=True,
+                text=True,
+            )
+        except Exception as e:
+            print(f"[warn] export full features failed: {e}")
 
 
 if __name__ == "__main__":

@@ -28,6 +28,10 @@ typedef struct {
     size_t sz;
 } U64Map;
 
+// Forward decls (used before definitions).
+static bool map_get(const U64Map *m, uint64_t k, uint64_t *out_v);
+static void map_put(U64Map *m, uint64_t k, uint64_t v);
+
 typedef struct {
     uint64_t *keys;
     uint8_t *used;
@@ -56,6 +60,8 @@ typedef struct {
     uint64_t mvs_seeded_normal;
     uint64_t mem_read_events;
     uint64_t mem_write_events;
+    uint64_t syscall_events;
+    U64Map syscall_hist;  // syscall_nr -> count
     uint64_t analysis_line_size;
     bool split_crossline;
     TfProfile *data_profile;
@@ -154,6 +160,25 @@ static uint64_t read_gpr_by_index(uc_engine *uc, int idx) {
     uint64_t v = 0;
     uc_reg_read(uc, reg_id, &v);
     return v;
+}
+
+static bool is_syscall_bytes(const TraceInsn *insn) {
+    if (!insn || insn->code_len < 2) return false;
+    // syscall
+    if (insn->code[0] == 0x0f && insn->code[1] == 0x05) return true;
+    // sysenter
+    if (insn->code[0] == 0x0f && insn->code[1] == 0x34) return true;
+    // int 0x80
+    if (insn->code_len >= 2 && insn->code[0] == 0xcd && insn->code[1] == 0x80) return true;
+    return false;
+}
+
+static void syscall_hist_add(Ctx *ctx, uint64_t nr) {
+    if (!ctx) return;
+    uint64_t cur = 0;
+    if (!map_get(&ctx->syscall_hist, nr, &cur)) cur = 0;
+    map_put(&ctx->syscall_hist, nr, cur + 1);
+    ctx->syscall_events++;
 }
 
 static void emit_mem_event(Ctx *ctx, const char *kind, uint64_t address, int size, bool salvaged) {
@@ -1089,12 +1114,14 @@ int main(int argc, char **argv) {
         .mvs_cursor = 0,
         .mem_read_events = 0,
         .mem_write_events = 0,
+        .syscall_events = 0,
         .analysis_line_size = o.analysis_line_size,
         .split_crossline = o.split_crossline,
         .data_profile = NULL,
     };
     map_init(&ctx.mvs_pc_scope, 1 << 12);
     set_init(&ctx.mvs_seeded_qw, 1 << 14);
+    map_init(&ctx.syscall_hist, 1 << 10);
     TfProfile *inst_profile = NULL;
     if (o.inst_analysis_path) {
         inst_profile = tf_profile_create(false, o.analysis_line_size, o.analysis_stack_depth);
@@ -1161,6 +1188,11 @@ int main(int argc, char **argv) {
         if (inst_profile) tf_profile_add_inst(inst_profile, prev.tid, prev.ip);
         uc_reg_write(uc, UC_X86_REG_RIP, &cur_addr);
         apply_rcx_soft_threshold(&ctx, o.rcx_soft_threshold, &prev);
+        if (is_syscall_bytes(&prev)) {
+            uint64_t rax = 0;
+            uc_reg_read(uc, UC_X86_REG_RAX, &rax);
+            syscall_hist_add(&ctx, rax);
+        }
         e = uc_emu_start(uc, cur_addr, cur_addr + prev.code_len, 0, 1);
         if (e != UC_ERR_OK) {
             emu_errors++;
@@ -1218,6 +1250,11 @@ int main(int argc, char **argv) {
         if (inst_profile) tf_profile_add_inst(inst_profile, prev.tid, prev.ip);
         uc_reg_write(uc, UC_X86_REG_RIP, &last_addr);
         apply_rcx_soft_threshold(&ctx, o.rcx_soft_threshold, &prev);
+        if (is_syscall_bytes(&prev)) {
+            uint64_t rax = 0;
+            uc_reg_read(uc, UC_X86_REG_RAX, &rax);
+            syscall_hist_add(&ctx, rax);
+        }
         e = uc_emu_start(uc, last_addr, last_addr + prev.code_len, 0, 1);
         if (e != UC_ERR_OK) {
             emu_errors++;
@@ -1290,6 +1327,7 @@ int main(int argc, char **argv) {
                 "  \"mem_read_events\": %" PRIu64 ",\n"
                 "  \"mem_write_events\": %" PRIu64 ",\n"
                 "  \"mem_total_events\": %" PRIu64 ",\n"
+                "  \"syscall_events\": %" PRIu64 ",\n"
                 "  \"emu_errors\": %" PRIu64 ",\n"
                 "  \"invalid_insn_errors\": %" PRIu64 ",\n"
                 "  \"salvaged_invalid_insns\": %" PRIu64 ",\n"
@@ -1297,8 +1335,8 @@ int main(int argc, char **argv) {
                 "  \"mvs_seeded_total\": %" PRIu64 ",\n"
                 "  \"mvs_seeded_indirect\": %" PRIu64 ",\n"
                 "  \"mvs_seeded_normal\": %" PRIu64 ",\n"
-                "  \"invalid_samples_written\": %" PRIu64 "\n"
-                "}\n",
+                "  \"invalid_samples_written\": %" PRIu64 ",\n"
+                "  \"syscalls\": [\n",
                 o.input_path,
                 o.output_path,
                 o.cpu_model_name,
@@ -1307,6 +1345,7 @@ int main(int argc, char **argv) {
                 ctx.mem_read_events,
                 ctx.mem_write_events,
                 ctx.mem_read_events + ctx.mem_write_events,
+                ctx.syscall_events,
                 emu_errors,
                 invalid_insn_errors,
                 salvaged_invalid_insns,
@@ -1316,6 +1355,19 @@ int main(int argc, char **argv) {
                 ctx.mvs_seeded_normal,
                 invalid_samples_cnt
             );
+            bool first = true;
+            for (size_t i = 0; i < ctx.syscall_hist.cap; i++) {
+                if (!ctx.syscall_hist.used[i]) continue;
+                fprintf(
+                    fr,
+                    "    %s{\"nr\": %" PRIu64 ", \"count\": %" PRIu64 "}\n",
+                    first ? "" : ",",
+                    ctx.syscall_hist.keys[i],
+                    ctx.syscall_hist.vals[i]
+                );
+                first = false;
+            }
+            fprintf(fr, "  ]\n}\n");
             fclose(fr);
         }
     }
@@ -1406,6 +1458,7 @@ int main(int argc, char **argv) {
     map_free(&ipmap);
     set_free(&pages);
     map_free(&ctx.mvs_pc_scope);
+    map_free(&ctx.syscall_hist);
     set_free(&ctx.mvs_seeded_qw);
     free(invalid_samples);
     tf_profile_destroy(inst_profile);

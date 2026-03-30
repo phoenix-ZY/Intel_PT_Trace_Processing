@@ -16,6 +16,10 @@ from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 
+import analyze_insn_trace_portrait as insn_portrait
+from perf_pipeline import perf_postprocess_one, run_step
+from perf_pipeline import add_perf_postprocess_args, validate_perf_postprocess_args
+
 DEFAULT_REPRESENTATIVE_BENCHES = [
     "505.mcf_r",  # memory-latency sensitive / pointer-chasing
     "520.omnetpp_r",  # discrete-event / branch-heavy control flow
@@ -122,41 +126,6 @@ def wait_trace_settle(
     return cur, False
 
 
-def run_step(
-    cmd: list[str],
-    *,
-    cwd: Path | None = None,
-    verbose: bool = False,
-    stdout_path: Path | None = None,
-    stderr_path: Path | None = None,
-    append_logs: bool = False,
-) -> None:
-    if verbose:
-        print("[cmd]", " ".join(shlex.quote(x) for x in cmd))
-    out_fp = None
-    err_fp = None
-    try:
-        if stdout_path is not None:
-            stdout_path.parent.mkdir(parents=True, exist_ok=True)
-            out_fp = stdout_path.open("a" if append_logs else "w", encoding="utf-8")
-        if stderr_path is not None:
-            stderr_path.parent.mkdir(parents=True, exist_ok=True)
-            err_fp = stderr_path.open("a" if append_logs else "w", encoding="utf-8")
-        subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            check=True,
-            text=True,
-            stdout=out_fp if out_fp is not None else (None if verbose else subprocess.DEVNULL),
-            stderr=err_fp if err_fp is not None else (None if verbose else subprocess.DEVNULL),
-        )
-    finally:
-        if out_fp is not None:
-            out_fp.close()
-        if err_fp is not None:
-            err_fp.close()
-
-
 def parse_warmups(s: str) -> list[float]:
     vals: list[float] = []
     for tok in s.split(","):
@@ -246,35 +215,6 @@ def shutil_which_or_spec(spec_root: Path) -> str:
     if candidate.exists() and os.access(candidate, os.X_OK):
         return str(candidate)
     raise RuntimeError("specinvoke not found")
-
-
-def extract_perf_insn_trace(perf_script_txt: Path, perf_insn_trace: Path, max_lines: int) -> int:
-    n = 0
-    with perf_script_txt.open("r", encoding="utf-8", errors="replace") as src, perf_insn_trace.open(
-        "w", encoding="utf-8"
-    ) as dst:
-        for line in src:
-            if " insn:" not in line:
-                continue
-            dst.write(line)
-            n += 1
-            if max_lines > 0 and n >= max_lines:
-                break
-    return n
-
-
-def parse_perf_script_health(stderr_path: Path) -> tuple[int, int]:
-    aux_lost = 0
-    trace_errors = 0
-    if not stderr_path.exists():
-        return aux_lost, trace_errors
-    for raw in stderr_path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip().lower()
-        if "aux data lost" in line:
-            aux_lost += 1
-        if "instruction trace errors" in line or "instruction trace error" in line:
-            trace_errors += 1
-    return aux_lost, trace_errors
 
 
 def load_compare_metrics(path: Path, metric_prefix: str = "") -> dict:
@@ -430,15 +370,16 @@ class CaseLayout:
     inst_sim_json: Path
     feature_bundle_json: Path
     sde_log: Path
+    perf_portrait_txt: Path
+    perf_portrait_stderr: Path
+    insn_portrait_json: Path
+    trace_profile_merged_json: Path
 
 
 @dataclass
 class PreparedCase:
     seq: int
     layout: CaseLayout
-    perf_insn_lines: int
-    perf_aux_lost: int
-    perf_trace_errors: int
 
 
 def make_case_layout(*, bench: str, warmup_seconds: float, output_base: Path) -> CaseLayout:
@@ -477,6 +418,10 @@ def make_case_layout(*, bench: str, warmup_seconds: float, output_base: Path) ->
         inst_sim_json=report_dir / f"{prefix}.sde_vs_perf.inst.locality.compare.json",
         feature_bundle_json=report_dir / f"{prefix}.features.bundle.json",
         sde_log=report_dir / f"{prefix}.sde.attach.log",
+        perf_portrait_txt=intermediate_dir / f"{prefix}.perf.insn.portrait.txt",
+        perf_portrait_stderr=report_dir / f"{prefix}.perf.portrait.script.stderr.txt",
+        insn_portrait_json=report_dir / f"{prefix}.insn.portrait.json",
+        trace_profile_merged_json=report_dir / f"{prefix}.trace_profile.merged.json",
     )
 
 
@@ -511,9 +456,16 @@ def print_case_ok(case: RunCase) -> None:
             f"inst_top3={case.metrics.get('inst_all_overall_top3_dims', '')}",
             f"pt_aux_lost={case.metrics.get('perf_aux_lost', 0)}",
             f"pt_trace_err={case.metrics.get('perf_trace_errors', 0)}",
+            f"portrait_insns={case.metrics.get('portrait_parsed_instructions', '')}",
+            f"merged={case.metrics.get('trace_profile_merged_json', '')}",
             f"out={case.out_dir}",
         )
         return
+    extra = []
+    if case.metrics.get("portrait_parsed_instructions") is not None:
+        extra.append(f"portrait_insns={case.metrics.get('portrait_parsed_instructions')}")
+    if case.metrics.get("trace_profile_merged_json"):
+        extra.append(f"merged={case.metrics.get('trace_profile_merged_json')}")
     print(
         "  ok:",
         "mode=perf-only",
@@ -522,6 +474,7 @@ def print_case_ok(case: RunCase) -> None:
         f"pt_trace_err={case.metrics.get('perf_trace_errors', 0)}",
         f"inst_analysis={case.metrics.get('perf_inst_analysis_json', '')}",
         f"data_analysis={case.metrics.get('perf_data_analysis_json', '')}",
+        *extra,
         f"out={case.out_dir}",
     )
 
@@ -817,28 +770,7 @@ def run_trace_phase(
         pass
     if not layout.perf_data.exists() or layout.perf_data.stat().st_size == 0:
         raise RuntimeError("empty perf.data")
-
-    run_step(
-        ["perf", "script", "--insn-trace", "-F", "tid,time,ip,insn", "-i", str(layout.perf_data)],
-        verbose=args.verbose,
-        stdout_path=layout.perf_script,
-        stderr_path=layout.perf_script_stderr,
-    )
-    perf_aux_lost, perf_trace_errors = parse_perf_script_health(layout.perf_script_stderr)
-    perf_insn_lines = extract_perf_insn_trace(layout.perf_script, layout.perf_insn, args.perf_max_insn_lines)
-    try:
-        layout.perf_script.unlink()
-    except FileNotFoundError:
-        pass
-    if perf_insn_lines < 1:
-        raise RuntimeError("no perf insn lines extracted")
-    return PreparedCase(
-        seq=seq,
-        layout=layout,
-        perf_insn_lines=perf_insn_lines,
-        perf_aux_lost=perf_aux_lost,
-        perf_trace_errors=perf_trace_errors,
-    )
+    return PreparedCase(seq=seq, layout=layout)
 
 
 def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.Namespace) -> RunCase:
@@ -880,49 +812,30 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
                 ],
                 verbose=args.verbose,
             )
-    recover_cmd = [
-        str(script_dir / "recover_mem_addrs_uc"),
-        "-i",
-        str(layout.perf_insn),
-        "-o",
-        str(layout.perf_rec_mem),
-        "--init-regs",
-        args.recover_init_regs,
-        "--reg-staging",
-        args.recover_reg_staging,
-        "--mvs",
-        args.recover_mvs,
-        "--seed",
-        str(args.recover_fill_seed),
-        "--page-init",
-        args.recover_page_init,
-        "--page-init-seed",
-        str(args.recover_page_init_seed),
-        "--progress-every",
-        str(args.recover_progress_every),
-        "--inst-analysis-out",
-        str(layout.perf_inst_analysis_json),
-        "--data-analysis-out",
-        str(layout.perf_data_analysis_json),
-        "--analysis-line-size",
-        str(args.line_size),
-        "--analysis-sdp-max-lines",
-        "262144",
-        "--analysis-rd-definition",
-        "stack_depth",
-        "--analysis-rd-hist-cap-lines",
-        str(args.analysis_rd_hist_cap_lines),
-        "--analysis-stride-bin-cap-lines",
-        str(args.analysis_stride_bin_cap_lines),
-    ]
-    if args.recover_salvage_invalid_mem:
-        recover_cmd.append("--salvage-invalid-mem")
-        if args.recover_salvage_reads:
-            recover_cmd.append("--salvage-reads")
-    run_step(recover_cmd, verbose=args.verbose)
-
-    if not layout.perf_data_analysis_json.exists() or not layout.perf_inst_analysis_json.exists():
-        raise RuntimeError("recover_mem_addrs_uc did not produce perf analysis JSON outputs")
+    perf_aux_lost, perf_trace_errors, perf_insn_lines, _, _, _, _, portrait_txt = perf_postprocess_one(
+        script_dir=script_dir,
+        perf_tool="perf",
+        perf_data=layout.perf_data,
+        prefix=layout.prefix,
+        intermediate_dir=layout.intermediate_dir,
+        mem_dir=layout.mem_dir,
+        report_dir=layout.report_dir,
+        perf_max_insn_lines=args.perf_max_insn_lines,
+        line_size=args.line_size,
+        analysis_rd_hist_cap_lines=args.analysis_rd_hist_cap_lines,
+        analysis_stride_bin_cap_lines=args.analysis_stride_bin_cap_lines,
+        recover_init_regs=args.recover_init_regs,
+        recover_reg_staging=args.recover_reg_staging,
+        recover_mvs=args.recover_mvs,
+        recover_fill_seed=args.recover_fill_seed,
+        recover_page_init=args.recover_page_init,
+        recover_page_init_seed=args.recover_page_init_seed,
+        recover_progress_every=args.recover_progress_every,
+        recover_salvage_invalid_mem=args.recover_salvage_invalid_mem,
+        recover_salvage_reads=args.recover_salvage_reads,
+        insn_portrait=getattr(args, "insn_portrait", True),
+        verbose=args.verbose,
+    )
 
     metrics = {}
     if args.enable_sde:
@@ -982,136 +895,76 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
         metrics["mode"] = "perf_only"
         metrics["perf_inst_analysis_json"] = str(layout.perf_inst_analysis_json)
         metrics["perf_data_analysis_json"] = str(layout.perf_data_analysis_json)
-    metrics["perf_insn_lines"] = prepared.perf_insn_lines
-    metrics["perf_aux_lost"] = prepared.perf_aux_lost
-    metrics["perf_trace_errors"] = prepared.perf_trace_errors
+    metrics["perf_insn_lines"] = perf_insn_lines
+    metrics["perf_aux_lost"] = perf_aux_lost
+    metrics["perf_trace_errors"] = perf_trace_errors
+
+    if getattr(args, "insn_portrait", False) and portrait_txt is not None and portrait_txt.is_file() and portrait_txt.stat().st_size > 0:
+        max_p = args.perf_max_insn_lines if args.perf_max_insn_lines > 0 else 0
+        rep = insn_portrait.analyze_file(portrait_txt, max_insns=max_p)
+        rep["input_path"] = str(layout.perf_portrait_txt.resolve())
+        layout.insn_portrait_json.parent.mkdir(parents=True, exist_ok=True)
+        layout.insn_portrait_json.write_text(json.dumps(rep, indent=2, ensure_ascii=False), encoding="utf-8")
+        metrics.update(insn_portrait.flatten_portrait_metrics(rep))
+        metrics["perf_insn_portrait_json"] = str(layout.insn_portrait_json)
+        # Free space: portrait trace text can be large; JSON is the stable artifact.
+        try:
+            portrait_txt.unlink()
+        except FileNotFoundError:
+            pass
+        merged = {
+            "schema": "trace-profile-v1",
+            "bench": layout.bench,
+            "warmup_seconds": layout.warmup,
+            "paths": {
+                "perf_data": str(layout.perf_data),
+                "perf_recovered_mem_jsonl": str(layout.perf_rec_mem),
+                "perf_data_analysis_json": str(layout.perf_data_analysis_json),
+                "perf_inst_analysis_json": str(layout.perf_inst_analysis_json),
+                "insn_portrait_json": str(layout.insn_portrait_json),
+            },
+            "insn_portrait": rep,
+        }
+        if args.enable_sde:
+            merged["paths"].update(
+                {
+                    "sde_data_analysis_json": str(layout.sde_data_analysis_json),
+                    "sde_inst_analysis_json": str(layout.sde_inst_analysis_json),
+                    "data_compare_json": str(layout.data_sim_json),
+                    "inst_compare_json": str(layout.inst_sim_json),
+                }
+            )
+        layout.trace_profile_merged_json.write_text(
+            json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        metrics["trace_profile_merged_json"] = str(layout.trace_profile_merged_json)
+
     return RunCase(bench=layout.bench, warmup=layout.warmup, status="ok", out_dir=str(layout.out_dir), metrics=metrics)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Simplified SPEC5 batch: data + inst locality similarity (SDE vs perf path)"
-    )
-    ap.add_argument(
-        "--spec-root",
-        type=Path,
-        default=Path("/home/huangtianhao/speccpu2017"),
-        help="SPEC CPU root",
-    )
-    ap.add_argument(
-        "--sde",
-        type=Path,
-        default=Path("/home/huangtianhao/ali/sde-external-9.53.0-2025-03-16-lin/sde64"),
-        help="sde64 path",
-    )
-    ap.add_argument(
-        "--enable-sde",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="enable SDE trace and SDE-vs-perf comparison (set --no-enable-sde for perf-only flow)",
-    )
-    ap.add_argument("--warmup-sweep", type=str, default="60,120", help="comma list, e.g. 60,120")
-    ap.add_argument("--total-insns", type=int, default=2_000_000)
-    ap.add_argument("--line-size", type=int, default=64)
-    ap.add_argument("--stride-top-k", type=int, default=20)
-    ap.add_argument("--perf-record-seconds", type=float, default=0.001)
-    ap.add_argument("--perf-mmap-pages", type=int, default=1024, help="perf record -m pages (PT buffer size)")
-    ap.add_argument("--perf-event", type=str, default="intel_pt/cyc,noretcomp=0/u")
-    ap.add_argument("--perf-max-insn-lines", type=int, default=500_000)
-    ap.add_argument("--trace-post-sde-sleep", type=float, default=8.0)
-    ap.add_argument("--trace-settle-timeout", type=float, default=300.0)
-    ap.add_argument("--trace-settle-interval", type=float, default=1.0)
-    ap.add_argument("--trace-stable-rounds", type=int, default=4)
-    ap.add_argument("--recover-init-regs", choices=["zero", "random"], default="random")
-    ap.add_argument(
-        "--recover-reg-staging",
-        choices=["legacy", "dwt"],
-        default="dwt",
-        help="register staging strategy passed to recover_mem_addrs_uc",
-    )
-    ap.add_argument(
-        "--recover-mvs",
-        choices=["on", "off"],
-        default="on",
-        help="whether to enable MVS in recover_mem_addrs_uc",
-    )
-    ap.add_argument("--recover-fill-seed", type=int, default=1)
-    ap.add_argument(
-        "--recover-page-init",
-        choices=["zero", "random", "stable"],
-        default="zero",
-        help="page initialization policy for recover_mem_addrs_uc (default: zero)",
-    )
-    ap.add_argument(
-        "--recover-page-init-seed",
-        type=int,
-        default=1,
-        help="seed for page random initialization (used when --recover-page-init=random)",
-    )
-    ap.add_argument("--recover-salvage-invalid-mem", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--recover-salvage-reads", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--recover-progress-every", type=int, default=0)
-    ap.add_argument(
-        "--write-feature-bundle",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="write per-case combined feature bundle JSON (default: true)",
-    )
-    ap.add_argument(
-        "--analysis-rd-hist-cap-lines",
-        type=int,
-        default=262144,
-        help="cap RD histogram bins above this line distance (0 disables cap)",
-    )
-    ap.add_argument(
-        "--analysis-stride-bin-cap-lines",
-        type=int,
-        default=262144,
-        help="cap stride |delta| bins above this line distance into tail bucket (0 disables cap)",
-    )
-    ap.add_argument(
-        "--output-base",
-        type=Path,
-        default=Path("/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_sde_perf_subset"),
-    )
-    ap.add_argument(
-        "--benchmarks",
-        type=str,
-        default="",
-        help="optional comma list like 505.mcf_r,510.parest_r; empty means representative subset",
-    )
-    ap.add_argument("--bench-limit", type=int, default=0, help="for quick test, limit benchmark count")
-    ap.add_argument(
-        "--post-workers",
-        type=int,
-        default=8,
-        help="number of workers for parallel post-processing (default: 8)",
-    )
-    ap.add_argument("--stop-on-error", action="store_true", help="stop batch immediately on first failure")
-    ap.add_argument("--verbose", action="store_true")
-    args = ap.parse_args()
-
+def _validate_spec_batch_common_args(args: argparse.Namespace) -> None:
     if args.total_insns <= 0:
         raise SystemExit("--total-insns must be > 0")
-    if args.line_size <= 0 or (args.line_size & (args.line_size - 1)) != 0:
-        raise SystemExit("--line-size must be positive power-of-two")
     if args.perf_record_seconds <= 0:
         raise SystemExit("--perf-record-seconds must be > 0")
     if args.perf_mmap_pages <= 0:
         raise SystemExit("--perf-mmap-pages must be > 0")
-    if args.perf_max_insn_lines < 0:
-        raise SystemExit("--perf-max-insn-lines must be >= 0")
     if args.recover_page_init_seed < 0:
         raise SystemExit("--recover-page-init-seed must be >= 0")
-    if args.analysis_rd_hist_cap_lines < 0:
-        raise SystemExit("--analysis-rd-hist-cap-lines must be >= 0")
-    if args.analysis_stride_bin_cap_lines < 0:
-        raise SystemExit("--analysis-stride-bin-cap-lines must be >= 0")
     if args.recover_progress_every < 0:
         raise SystemExit("--recover-progress-every must be >= 0")
     if args.post_workers <= 0:
         raise SystemExit("--post-workers must be > 0")
 
+
+def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = None) -> int:
+    """
+    Run the SPEC × warmup batch: trace collection (optional SDE) + post-process + summary.
+
+    Shared by this module's CLI and `run_spec5_perf_trace_analysis.py` (perf-only).
+    """
+    _validate_spec_batch_common_args(args)
+    validate_perf_postprocess_args(args)
     spec_cpu = args.spec_root / "benchspec" / "CPU"
     if not spec_cpu.is_dir():
         raise SystemExit(f"not found: {spec_cpu}")
@@ -1131,7 +984,7 @@ def main() -> int:
     if not benches:
         raise SystemExit("no benchmarks selected")
 
-    script_dir = Path(__file__).resolve().parent
+    root = script_dir if script_dir is not None else Path(__file__).resolve().parent
     summary: list[RunCase] = []
     print(f"[batch] benches={len(benches)} warmups={warmups}")
     bench_run_dirs: dict[str, Path] = {}
@@ -1168,7 +1021,7 @@ def main() -> int:
                 prepared = run_trace_phase(
                     seq=seq,
                     layout=layout,
-                    script_dir=script_dir,
+                    script_dir=root,
                     spec_root=args.spec_root,
                     sde_path=args.sde,
                     run_dir=run_dir,
@@ -1176,7 +1029,7 @@ def main() -> int:
                 )
                 prepared_cases.append(prepared)
                 seq += 1
-                print(f"  traced: perf_insn_lines={prepared.perf_insn_lines} out={layout.out_dir}")
+                print(f"  traced: perf_data=ok out={layout.out_dir}")
             except Exception as e:
                 msg = str(e)
                 print(f"  error: {msg}")
@@ -1195,7 +1048,7 @@ def main() -> int:
                 done += 1
                 print(f"[post {done}/{len(prepared_cases)}] bench={prepared.layout.bench} warmup={prepared.layout.warmup:g}s")
                 try:
-                    case = run_post_phase(script_dir=script_dir, prepared=prepared, args=args)
+                    case = run_post_phase(script_dir=root, prepared=prepared, args=args)
                     summary.append(case)
                     print_case_ok(case)
                 except Exception as e:
@@ -1212,7 +1065,7 @@ def main() -> int:
             done = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                 fut_map = {
-                    ex.submit(run_post_phase, script_dir=script_dir, prepared=prepared, args=args): prepared
+                    ex.submit(run_post_phase, script_dir=root, prepared=prepared, args=args): prepared
                     for prepared in prepared_cases
                 }
                 for fut in concurrent.futures.as_completed(fut_map):
@@ -1281,7 +1134,89 @@ def main() -> int:
     if warmup_pair is not None:
         print(f"  warmup pairwise json: {warmup_pair[0]}")
         print(f"  warmup pairwise csv:  {warmup_pair[1]}")
+
+    if getattr(args, "export_full_features", True):
+        exporter = (Path(__file__).resolve().parent / "export_perf_full_features.py").resolve()
+        try:
+            subprocess.run(
+                [sys.executable, str(exporter), "--output-base", str(args.output_base)],
+                check=True,
+                text=True,
+            )
+        except Exception as e:
+            print("[warn] export full features failed:", e)
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Simplified SPEC5 batch: data + inst locality similarity (SDE vs perf path)"
+    )
+    ap.add_argument(
+        "--spec-root",
+        type=Path,
+        default=Path("/home/huangtianhao/speccpu2017"),
+        help="SPEC CPU root",
+    )
+    ap.add_argument(
+        "--sde",
+        type=Path,
+        default=Path("/home/huangtianhao/ali/sde-external-9.53.0-2025-03-16-lin/sde64"),
+        help="sde64 path",
+    )
+    ap.add_argument(
+        "--enable-sde",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="enable SDE trace and SDE-vs-perf comparison; for perf-only SPEC batch prefer run_spec5_perf_trace_analysis.py",
+    )
+    ap.add_argument("--warmup-sweep", type=str, default="60,120", help="comma list, e.g. 60,120")
+    ap.add_argument("--total-insns", type=int, default=2_000_000)
+    # Perf post-process args (shared with cloud pipeline)
+    add_perf_postprocess_args(ap)
+    ap.add_argument("--stride-top-k", type=int, default=20)
+    ap.add_argument("--perf-record-seconds", type=float, default=0.001)
+    ap.add_argument("--perf-mmap-pages", type=int, default=1024, help="perf record -m pages (PT buffer size)")
+    ap.add_argument("--perf-event", type=str, default="intel_pt/cyc,noretcomp=0/u")
+    ap.add_argument("--trace-post-sde-sleep", type=float, default=8.0)
+    ap.add_argument("--trace-settle-timeout", type=float, default=300.0)
+    ap.add_argument("--trace-settle-interval", type=float, default=1.0)
+    ap.add_argument("--trace-stable-rounds", type=int, default=4)
+    # NOTE: other perf post-process args are added by add_perf_postprocess_args(ap)
+    ap.add_argument(
+        "--write-feature-bundle",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="write per-case combined feature bundle JSON (default: true)",
+    )
+    ap.add_argument(
+        "--output-base",
+        type=Path,
+        default=Path("/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_sde_perf_subset"),
+    )
+    ap.add_argument(
+        "--benchmarks",
+        type=str,
+        default="",
+        help="optional comma list like 505.mcf_r,510.parest_r; empty means representative subset",
+    )
+    ap.add_argument("--bench-limit", type=int, default=0, help="for quick test, limit benchmark count")
+    ap.add_argument(
+        "--post-workers",
+        type=int,
+        default=8,
+        help="number of workers for parallel post-processing (default: 8)",
+    )
+    ap.add_argument("--stop-on-error", action="store_true", help="stop batch immediately on first failure")
+    ap.add_argument("--verbose", action="store_true")
+    ap.add_argument(
+        "--export-full-features",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After run, export perf_full_features.(csv/xlsx) by concatenating recovered data features + portrait (+recover report).",
+    )
+    args = ap.parse_args()
+    return run_spec_batch_main(args)
 
 
 if __name__ == "__main__":
