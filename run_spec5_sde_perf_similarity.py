@@ -875,7 +875,17 @@ def run_trace_phase_perf_stream(
             except Exception:
                 # Common race: benchmark exits between the alive check and perf attach.
                 # In that case, keep already collected samples and stop sampling gracefully.
-                if not pid_alive(target_pid):
+                esrch = False
+                try:
+                    if layout.perf_record_stderr.is_file():
+                        t = layout.perf_record_stderr.read_text(encoding="utf-8", errors="replace").lower()
+                        # perf: sys_perf_event_open ESRCH, e.g.:
+                        #   "returned with 3 (No such process)" or similar.
+                        if "no such process" in t or "sys_perf_event_open" in t and "returned with 3" in t:
+                            esrch = True
+                except OSError:
+                    pass
+                if esrch or not pid_alive(target_pid):
                     break
                 raise
             if not layout.perf_data.exists() or layout.perf_data.stat().st_size == 0:

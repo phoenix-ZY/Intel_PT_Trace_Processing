@@ -48,10 +48,10 @@ from perf_pipeline import add_perf_postprocess_args, validate_perf_postprocess_a
 DEFAULT_OUTPUT_DIR = Path("/home/huangtianhao/Intel_PT_Trace_Processing/outputs/cloud_trace")
 DEFAULT_PERF_TOOL = Path("/usr/bin/perf")
 
-DEFAULT_INTERVAL = 10          # seconds between successive PT recordings
+DEFAULT_INTERVAL = 30          # seconds between successive PT recordings
 DEFAULT_RECORD_DURATION = 0.001  # seconds of PT recording per sample
 DEFAULT_BENCH_DURATION = 120   # seconds to run each benchmark load
-DEFAULT_SAMPLES_PER_CONFIG = 1
+DEFAULT_SAMPLES_PER_CONFIG = 2
 DEFAULT_WARMUP_DURATION = 20   # seconds to warm up before first sample
 
 # perf record -m: data_pages,aux_pages (each a power of two). Intel PT uses the AUX ring; defaults are
@@ -152,6 +152,27 @@ def mysql_ready_from_bench_client(host: str, *, timeout_s: int = 120) -> bool:
         # mysqladmin is available in bench-client image; use TCP connect + auth.
         cmd = f"mysqladmin ping -h {host} -uroot -ppassword --silent"
         pr = docker_exec(BENCH_CONTAINER, cmd)
+        if pr.returncode == 0:
+            return True
+        time.sleep(1)
+    return False
+
+
+def nginx_ready_from_bench_client(host: str, path: str = "/index.html", *, timeout_s: int = 60) -> bool:
+    """Verify Nginx is reachable from BENCH_CONTAINER (HTTP 2xx/3xx)."""
+    deadline = time.monotonic() + float(timeout_s)
+    url = f"http://{host}{path}"
+    while time.monotonic() < deadline:
+        # bench-client image may not ship wget; prefer curl when available.
+        pr = docker_exec(
+            BENCH_CONTAINER,
+            "sh -lc "
+            + "\""
+            + f"(command -v curl >/dev/null 2>&1 && curl -fsS --max-time 2 {url} >/dev/null)"
+            + " || "
+            + f"(command -v wget >/dev/null 2>&1 && wget -q -O- --timeout=2 --tries=1 {url} >/dev/null)"
+            + "\"",
+        )
         if pr.returncode == 0:
             return True
         time.sleep(1)
@@ -456,12 +477,12 @@ def build_config_matrix(project_dir: Path) -> dict[str, list[dict]]:
         f"--network {NETWORK_NAME} --ip {SERVICE_IPS['nginx']} "
         f"-v {project_dir}/www:/usr/share/nginx/html:ro "
         f"-v {nginx_conf}:/etc/nginx/nginx.conf:ro "
-        f"nginx:alpine"
+        f"nginx:alpine "
     )
     nginx_configs = [
         {
             "config_name": "w1_small",
-            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=1",
+            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=1 nginx:alpine "),
             "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 30 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/index.html",
             "container_name": "target-nginx",
             "service_type": "nginx",
@@ -469,7 +490,7 @@ def build_config_matrix(project_dir: Path) -> dict[str, list[dict]]:
         },
         {
             "config_name": "w4_small",
-            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=4",
+            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=4 nginx:alpine "),
             "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 50 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/index.html",
             "container_name": "target-nginx",
             "service_type": "nginx",
@@ -477,7 +498,7 @@ def build_config_matrix(project_dir: Path) -> dict[str, list[dict]]:
         },
         {
             "config_name": "w8_small",
-            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=8",
+            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=8 nginx:alpine "),
             "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t4 -c 200 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/index.html",
             "container_name": "target-nginx",
             "service_type": "nginx",
@@ -485,7 +506,7 @@ def build_config_matrix(project_dir: Path) -> dict[str, list[dict]]:
         },
         {
             "config_name": "w4_1k",
-            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=4",
+            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=4 nginx:alpine "),
             "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 80 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/1k.bin",
             "container_name": "target-nginx",
             "service_type": "nginx",
@@ -493,7 +514,7 @@ def build_config_matrix(project_dir: Path) -> dict[str, list[dict]]:
         },
         {
             "config_name": "w4_64k",
-            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=4",
+            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=4 nginx:alpine "),
             "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 30 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/64k.bin",
             "container_name": "target-nginx",
             "service_type": "nginx",
@@ -979,6 +1000,10 @@ def run_single_config(
                 f"nginx:alpine"
             )
             time.sleep(2)
+            if not nginx_ready_from_bench_client(SERVICE_IPS["nginx"], "/index.html", timeout_s=30):
+                log("❌", "Nginx backend (target-nginx-helper) not reachable from bench-client (HTTP)")
+                docker_stop_rm("target-nginx-helper")
+                return
 
         # ── Start the target service ─────────────────────────────────────
         docker_stop_rm(container_name)
@@ -994,6 +1019,13 @@ def run_single_config(
         if config.get("needs_pgbench_init"):
             startup_wait = 10  # PostgreSQL needs more time
         time.sleep(startup_wait)
+
+        # ── Wait for Nginx to serve HTTP (avoids immediate-exit / not-ready cases) ──
+        if service_type == "nginx":
+            if not nginx_ready_from_bench_client(SERVICE_IPS["nginx"], "/index.html", timeout_s=60):
+                log("❌", "Nginx not reachable from bench-client (HTTP)")
+                docker_stop_rm(container_name)
+                return
 
         # ── Wait for MySQL to accept connections ──────────────────────────
         if config.get("needs_mysql_ready"):
