@@ -35,9 +35,19 @@ def main() -> int:
     ap.add_argument("--warmup-sweep", type=str, default="10", help="comma list, e.g. 60,120")
     ap.add_argument("--total-insns", type=int, default=5_000_000)
     ap.add_argument("--line-size", type=int, default=64)
-    ap.add_argument("--perf-record-seconds", type=float, default=0.001)
-    ap.add_argument("--perf-mmap-pages", type=int, default=1024, help="perf record -m pages (PT buffer size)")
+    # Too-short sampling windows often produce only mmap/comm events and no decoded insn trace.
+    ap.add_argument("--perf-record-seconds", type=float, default=0.1)
+    # NOTE: Intel PT uses an AUX ring buffer that is mlock()'d; many systems have a low
+    # kernel.perf_event_mlock_kb / RLIMIT_MEMLOCK, so a large default (e.g. 1024 pages)
+    # frequently fails with "Permission error mapping pages". Keep this conservative by default.
+    ap.add_argument("--perf-mmap-pages", type=int, default=64, help="perf record -m pages (PT buffer size)")
     ap.add_argument("--perf-event", type=str, default="intel_pt/cyc,noretcomp=0/u")
+    ap.add_argument(
+        "--spec-perf-attach",
+        choices=["process", "busiest-tid"],
+        default="busiest-tid",
+        help="perf record: attach whole process (-p) or hottest thread (-t), same idea as cloud collector",
+    )
     ap.add_argument("--perf-max-insn-lines", type=int, default=5_000_000)
     ap.add_argument("--trace-post-sde-sleep", type=float, default=8.0)
     ap.add_argument("--trace-settle-timeout", type=float, default=300.0)
@@ -121,7 +131,7 @@ def main() -> int:
         "--perf-stream-interval",
         type=float,
         default=15.0,
-        help="Perf-only stream sampling interval seconds (default: 10).",
+        help="Perf-only stream sampling interval seconds (default: 15).",
     )
     ap.add_argument(
         "--perf-stream-first-after",

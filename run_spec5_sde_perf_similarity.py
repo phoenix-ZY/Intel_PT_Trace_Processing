@@ -49,6 +49,241 @@ def read_proc_exe(pid: int) -> str:
         return ""
 
 
+def read_proc_argv0_basename(pid: int) -> str:
+    """
+    Read argv[0] basename from /proc/<pid>/cmdline.
+
+    Why: in SPEC CPU runs the benchmark binary may be executed from a copied/renamed
+    path like /tmp/fileXXXX (so /proc/<pid>/exe basename is "fileXXXX"), while argv[0]
+    often remains the original "../run_base.../<bench>_base..." string. For PID
+    resolution, argv[0] is a more stable identifier in that case.
+    """
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return ""
+    if not raw:
+        return ""
+    argv0_b = raw.split(b"\0", 1)[0]
+    if not argv0_b:
+        return ""
+    argv0 = argv0_b.decode("utf-8", errors="replace").strip()
+    if not argv0:
+        return ""
+    return Path(argv0).name
+
+
+def read_proc_ppid(pid: int) -> int:
+    try:
+        for line in (Path("/proc") / str(pid) / "status").read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("PPid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def is_descendant_of(pid: int, ancestor: int) -> bool:
+    if pid <= 1 or ancestor <= 0:
+        return False
+    cur = pid
+    for _ in range(2048):
+        if cur == ancestor:
+            return True
+        ppid = read_proc_ppid(cur)
+        if ppid <= 1:
+            return False
+        cur = ppid
+    return False
+
+
+def is_strict_descendant_of(pid: int, ancestor: int) -> bool:
+    """True if pid is a proper descendant of ancestor (pid != ancestor)."""
+    if pid <= 1 or ancestor <= 0 or pid == ancestor:
+        return False
+    cur = read_proc_ppid(pid)
+    for _ in range(2048):
+        if cur == ancestor:
+            return True
+        if cur <= 1:
+            return False
+        cur = read_proc_ppid(cur)
+    return False
+
+
+def scan_proc_benchmark_pid(
+    run_dir: Path,
+    exe_basename: str,
+    prefer_under_pid: int,
+) -> int | None:
+    """
+    Last-resort PID lookup: same information `ps` uses, but via /proc (no brittle parsing).
+
+    When the launcher shell has not exec'd yet, or the process tree is odd, BFS from
+    launcher_pid can miss the real benchmark while `ps` still shows it under run_dir.
+    We match cwd == run_dir and argv[0] basename == exe_basename.
+
+    SPEC workloads like 505.mcf_r often fork a parent that stays sleeping (same argv0/cwd)
+    and a child that runs hot. is_descendant_of(p, launcher) is True when p==launcher,
+    so we must not return the parent first; among launcher + descendants in candidates,
+    pick the highest ps pcpu.
+    """
+    try:
+        run_res = run_dir.resolve()
+    except OSError:
+        return None
+    candidates: list[int] = []
+    for p in Path("/proc").iterdir():
+        if not p.name.isdigit():
+            continue
+        pid = int(p.name)
+        try:
+            cwd = Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
+        except OSError:
+            continue
+        if cwd != run_res:
+            continue
+        if read_proc_argv0_basename(pid) != exe_basename:
+            continue
+        candidates.append(pid)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    in_tree = [
+        p
+        for p in candidates
+        if p == prefer_under_pid or is_strict_descendant_of(p, prefer_under_pid)
+    ]
+    pool = in_tree if in_tree else candidates
+    return pick_hottest_pid_by_ps_pcpu(pool)
+
+
+def read_ps_pcpu(pid: int) -> float:
+    try:
+        pr = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "pcpu=", "--no-headers"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return float(pr.stdout.strip() or "0")
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        return 0.0
+
+
+def pick_hottest_pid_by_ps_pcpu(pids: list[int]) -> int:
+    if not pids:
+        raise ValueError("empty pids")
+    if len(pids) == 1:
+        return pids[0]
+    best = pids[0]
+    best_c = read_ps_pcpu(best)
+    for pid in pids[1:]:
+        c = read_ps_pcpu(pid)
+        if c > best_c:
+            best, best_c = pid, c
+    return best
+
+
+def spec_get_thread_tids(pid: int) -> list[dict[str, float | int | str]]:
+    """
+    Threads under pid via ps -T (same idea as run_cloud_perf_trace_analysis.get_thread_tids).
+    Sorted by pcpu descending in Python (some ps builds ignore --sort with -T).
+    """
+    result = subprocess.run(
+        ["ps", "-T", "-p", str(pid), "-o", "spid=", "-o", "pcpu=", "-o", "comm="],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    threads: list[dict[str, float | int | str]] = []
+    for line in (result.stdout or "").strip().splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit():
+            threads.append(
+                {
+                    "tid": int(parts[0]),
+                    "cpu": float(parts[1]),
+                    "comm": parts[2] if len(parts) > 2 else "",
+                }
+            )
+    threads.sort(key=lambda t: float(t["cpu"]), reverse=True)
+    return threads
+
+
+def spec_get_busiest_tid(pid: int) -> int:
+    threads = spec_get_thread_tids(pid)
+    if threads:
+        return int(threads[0]["tid"])
+    return pid
+
+
+def pick_spec_perf_record_target(
+    resolved_process_pid: int,
+    perf_attach: str,
+) -> tuple[int, str]:
+    """
+    Returns (id_for_perf, flag) where flag is '-p' or '-t' for perf record.
+    Cloud pipeline uses -t <busiest_tid> for PT on hot threads.
+    """
+    mode = (perf_attach or "process").strip().lower()
+    if mode in ("busiest-tid", "busiest_tid", "tid"):
+        tid = spec_get_busiest_tid(resolved_process_pid)
+        return tid, "-t"
+    return resolved_process_pid, "-p"
+
+
+def log_spec_perf_attach(
+    *,
+    bench: str,
+    phase: str,
+    launcher_pid: int,
+    resolved_pid: int,
+    perf_flag: str,
+    perf_id: int,
+    run_dir: Path,
+    sample_label: str = "",
+) -> None:
+    exe = read_proc_exe(resolved_pid)
+    argv0 = read_proc_argv0_basename(resolved_pid)
+    try:
+        cwd = os.readlink(f"/proc/{resolved_pid}/cwd")
+    except OSError:
+        cwd = ""
+    sfx = f" {sample_label}" if sample_label else ""
+    print(
+        f"[spec-pt]{sfx} bench={bench} phase={phase} launcher_pid={launcher_pid} "
+        f"resolved_pid={resolved_pid} perf_record {perf_flag} {perf_id} "
+        f"exe={exe} argv0_basename={argv0} cwd={cwd}",
+        flush=True,
+    )
+
+
+def pick_spec_benchmark_pid(
+    launcher_pid: int,
+    run_dir: Path,
+    exe_basename: str,
+    *,
+    resolve_timeout: float = 8.0,
+) -> int:
+    """
+    Prefer /proc scan (cwd + argv0) so we attach to the same process `ps` shows in the run dir,
+    then fall back to tree walk from the launcher.
+    """
+    scanned = scan_proc_benchmark_pid(run_dir, exe_basename, launcher_pid)
+    if scanned is not None:
+        return scanned
+    return resolve_target_pid(
+        launcher_pid,
+        exe_basename,
+        run_dir=run_dir,
+        timeout_s=resolve_timeout,
+    )
+
+
 def children_of(pid: int) -> list[int]:
     children_file = Path("/proc") / str(pid) / "task" / str(pid) / "children"
     try:
@@ -84,18 +319,74 @@ def cleanup_pid(pid: int | None) -> None:
         pass
 
 
-def resolve_target_pid(launcher_pid: int, exe_basename: str, timeout_s: float = 8.0) -> int:
+def collect_matching_pids_under_launcher(
+    launcher_pid: int,
+    exe_basename: str | None,
+    run_dir: Path | None,
+) -> list[int]:
+    """
+    BFS under launcher_pid; collect every pid that looks like the benchmark binary.
+    Used to prefer the hot child when parent+child share argv0/cwd (e.g. mcf_r fork).
+    """
+    out: list[int] = []
+    if not exe_basename or not pid_alive(launcher_pid):
+        return out
+
+    def matches(pid: int) -> bool:
+        cexe = read_proc_exe(pid)
+        if cexe and Path(cexe).name == exe_basename:
+            return True
+        if read_proc_argv0_basename(pid) == exe_basename:
+            return True
+        if run_dir:
+            try:
+                cwd = os.readlink(f"/proc/{pid}/cwd")
+                if (
+                    cexe
+                    and Path(cexe).is_file()
+                    and str(Path(cexe).resolve()).startswith(str(run_dir.resolve()) + os.sep)
+                    and Path(cwd).resolve() == run_dir.resolve()
+                ):
+                    return True
+            except OSError:
+                pass
+        return False
+
+    q = [launcher_pid]
+    seen: set[int] = set()
+    while q:
+        pid = q.pop(0)
+        if pid in seen:
+            continue
+        if len(seen) >= 4096:
+            break
+        seen.add(pid)
+        if matches(pid):
+            out.append(pid)
+        for cpid in children_of(pid):
+            if cpid not in seen:
+                q.append(cpid)
+    return out
+
+
+def resolve_target_pid(
+    launcher_pid: int,
+    exe_basename: str | None = None,
+    *,
+    run_dir: Path | None = None,
+    timeout_s: float = 8.0,
+) -> int:
     end = time.time() + timeout_s
     while time.time() <= end:
-        if pid_alive(launcher_pid):
-            exe = read_proc_exe(launcher_pid)
-            if exe and Path(exe).name == exe_basename:
-                return launcher_pid
-            for cpid in children_of(launcher_pid):
-                cexe = read_proc_exe(cpid)
-                if cexe and Path(cexe).name == exe_basename:
-                    return cpid
+        if pid_alive(launcher_pid) and exe_basename:
+            cands = collect_matching_pids_under_launcher(launcher_pid, exe_basename, run_dir)
+            if cands:
+                return pick_hottest_pid_by_ps_pcpu(cands)
         time.sleep(0.02)
+    if run_dir is not None and exe_basename:
+        scanned = scan_proc_benchmark_pid(run_dir, exe_basename, launcher_pid)
+        if scanned is not None:
+            return scanned
     return launcher_pid
 
 
@@ -664,9 +955,11 @@ def run_trace_phase(
         time.sleep(1.0)
         if not pid_alive(launcher_pid):
             raise RuntimeError("SDE phase launcher failed to start")
-        target_pid = resolve_target_pid(launcher_pid, exe_basename, timeout_s=8.0)
+        target_pid = pick_spec_benchmark_pid(launcher_pid, run_dir, exe_basename, resolve_timeout=8.0)
         target_exe = read_proc_exe(target_pid)
-        if not target_exe or Path(target_exe).name != exe_basename:
+        argv0_ok = read_proc_argv0_basename(target_pid) == exe_basename
+        exe_ok = bool(target_exe) and Path(target_exe).name == exe_basename
+        if not target_exe or (not exe_ok and not argv0_ok):
             cleanup_pid(launcher_pid)
             raise RuntimeError("cannot resolve benchmark pid for SDE phase")
         if layout.warmup > 0:
@@ -720,11 +1013,13 @@ def run_trace_phase(
             raise RuntimeError("empty SDE trace")
 
     # ---- perf phase ----
+    shrc = spec_root / "shrc"
+    env_prefix = f"source {shlex.quote(str(shrc))} >/dev/null 2>&1 || true; " if shrc.exists() else ""
     with (layout.report_dir / f"{layout.prefix}.spec.perf.stdout.txt").open("w", encoding="utf-8") as out_fp, (
         layout.report_dir / f"{layout.prefix}.spec.perf.stderr.txt"
     ).open("w", encoding="utf-8") as err_fp:
         perf_launcher = subprocess.Popen(
-            ["bash", "-lc", f"exec {cmd_line}"],
+            ["bash", "-lc", f"{env_prefix}exec {cmd_line}"],
             cwd=run_dir,
             stdout=out_fp,
             stderr=err_fp,
@@ -734,9 +1029,26 @@ def run_trace_phase(
     time.sleep(1.0)
     if not pid_alive(perf_launcher_pid):
         raise RuntimeError("perf phase launcher failed to start")
-    perf_target_pid = resolve_target_pid(perf_launcher_pid, exe_basename, timeout_s=8.0)
+    probe = pick_spec_benchmark_pid(perf_launcher_pid, run_dir, exe_basename, resolve_timeout=8.0)
+    if not pid_alive(probe):
+        cleanup_pid(perf_launcher_pid)
+        raise RuntimeError("benchmark exited before perf warmup")
     if layout.warmup > 0:
         time.sleep(layout.warmup)
+    perf_target_pid = pick_spec_benchmark_pid(
+        perf_launcher_pid, run_dir, exe_basename, resolve_timeout=8.0
+    )
+    attach = getattr(args, "spec_perf_attach", "busiest-tid")
+    perf_id, perf_flag = pick_spec_perf_record_target(perf_target_pid, attach)
+    log_spec_perf_attach(
+        bench=layout.bench,
+        phase="perf_once",
+        launcher_pid=perf_launcher_pid,
+        resolved_pid=perf_target_pid,
+        perf_flag=perf_flag,
+        perf_id=perf_id,
+        run_dir=run_dir,
+    )
     if not pid_alive(perf_target_pid):
         cleanup_pid(perf_launcher_pid)
         raise RuntimeError("benchmark exited before perf attach")
@@ -752,8 +1064,8 @@ def run_trace_phase(
             args.perf_event,
             "-o",
             str(layout.perf_data),
-            "-p",
-            str(perf_target_pid),
+            perf_flag,
+            str(perf_id),
             "--",
             "sleep",
             str(args.perf_record_seconds),
@@ -811,9 +1123,11 @@ def run_trace_phase_perf_stream(
     out_path = stream_report / f"{bench.replace('.', '_')}.spec.perf.stdout.txt"
     err_path = stream_report / f"{bench.replace('.', '_')}.spec.perf.stderr.txt"
 
+    shrc = spec_root / "shrc"
+    env_prefix = f"source {shlex.quote(str(shrc))} >/dev/null 2>&1 || true; " if shrc.exists() else ""
     with out_path.open("w", encoding="utf-8") as out_fp, err_path.open("w", encoding="utf-8") as err_fp:
         launcher = subprocess.Popen(
-            ["bash", "-lc", f"exec {cmd_line}"],
+            ["bash", "-lc", f"{env_prefix}exec {cmd_line}"],
             cwd=run_dir,
             stdout=out_fp,
             stderr=err_fp,
@@ -824,7 +1138,8 @@ def run_trace_phase_perf_stream(
     time.sleep(1.0)
     if not pid_alive(launcher_pid):
         raise RuntimeError("perf stream launcher failed to start")
-    target_pid = resolve_target_pid(launcher_pid, exe_basename, timeout_s=8.0)
+    target_pid = pick_spec_benchmark_pid(launcher_pid, run_dir, exe_basename, resolve_timeout=8.0)
+    attach = getattr(args, "spec_perf_attach", "busiest-tid")
     if not pid_alive(target_pid):
         cleanup_pid(launcher_pid)
         raise RuntimeError("benchmark exited before perf stream sampling")
@@ -849,6 +1164,24 @@ def run_trace_phase_perf_stream(
             if not pid_alive(target_pid):
                 break
 
+            # Re-resolve before each sample: same criteria as `ps` in run_dir (scan wins).
+            target_pid = pick_spec_benchmark_pid(
+                launcher_pid, run_dir, exe_basename, resolve_timeout=1.5
+            )
+            if not pid_alive(target_pid):
+                break
+            perf_id, perf_flag = pick_spec_perf_record_target(target_pid, attach)
+            log_spec_perf_attach(
+                bench=bench,
+                phase="perf_stream",
+                launcher_pid=launcher_pid,
+                resolved_pid=target_pid,
+                perf_flag=perf_flag,
+                perf_id=perf_id,
+                run_dir=run_dir,
+                sample_label=f"sample_index={sample_idx} t={next_at:g}s",
+            )
+
             # Materialize one sample as its own case (warmup_seconds = time since start).
             layout = make_case_layout(bench=bench, warmup_seconds=next_at, output_base=args.output_base)
             try:
@@ -863,8 +1196,8 @@ def run_trace_phase_perf_stream(
                         args.perf_event,
                         "-o",
                         str(layout.perf_data),
-                        "-p",
-                        str(target_pid),
+                        perf_flag,
+                        str(perf_id),
                         "--",
                         "sleep",
                         str(args.perf_record_seconds),
@@ -1120,6 +1453,26 @@ def _validate_spec_batch_common_args(args: argparse.Namespace) -> None:
         raise SystemExit("--recover-progress-every must be >= 0")
     if args.post_workers <= 0:
         raise SystemExit("--post-workers must be > 0")
+
+    # Perf permission preflight: on many systems kernel.perf_event_paranoid defaults to a
+    # restrictive value (e.g. 4) that prevents *all* CPU PMU events for unprivileged users.
+    # Intel PT (and even cycles:u) will fail with exit code 255 in that case.
+    try:
+        paranoid_txt = Path("/proc/sys/kernel/perf_event_paranoid").read_text(encoding="utf-8").strip()
+        paranoid = int(paranoid_txt)
+        if paranoid >= 2:
+            raise SystemExit(
+                "perf is blocked by kernel.perf_event_paranoid="
+                + str(paranoid)
+                + ".\n"
+                + "Fix (temporary):  sudo sysctl -w kernel.perf_event_paranoid=1\n"
+                + "Fix (permanent):  add 'kernel.perf_event_paranoid = 1' to /etc/sysctl.conf\n"
+                + "Alternatively run the collector under sudo/root, or grant CAP_PERFMON to perf."
+            )
+    except FileNotFoundError:
+        pass
+    except ValueError:
+        pass
 
 
 def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = None) -> int:
@@ -1382,9 +1735,18 @@ def main() -> int:
     # Perf post-process args (shared with cloud pipeline)
     add_perf_postprocess_args(ap)
     ap.add_argument("--stride-top-k", type=int, default=20)
-    ap.add_argument("--perf-record-seconds", type=float, default=0.001)
-    ap.add_argument("--perf-mmap-pages", type=int, default=1024, help="perf record -m pages (PT buffer size)")
+    # Too-short windows often yield no decoded insn trace from Intel PT.
+    ap.add_argument("--perf-record-seconds", type=float, default=0.1)
+    # Intel PT AUX buffers are mlock()'d; keep default conservative to avoid
+    # "Permission error mapping pages" on systems with low memlock limits.
+    ap.add_argument("--perf-mmap-pages", type=int, default=64, help="perf record -m pages (PT buffer size)")
     ap.add_argument("--perf-event", type=str, default="intel_pt/cyc,noretcomp=0/u")
+    ap.add_argument(
+        "--spec-perf-attach",
+        choices=["process", "busiest-tid"],
+        default="busiest-tid",
+        help="perf record target: whole process (-p PID) or hottest thread (-t TID), like cloud collector",
+    )
     ap.add_argument("--trace-post-sde-sleep", type=float, default=8.0)
     ap.add_argument("--trace-settle-timeout", type=float, default=300.0)
     ap.add_argument("--trace-settle-interval", type=float, default=1.0)
