@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import subprocess
@@ -51,7 +52,7 @@ DEFAULT_INTERVAL = 10          # seconds between successive PT recordings
 DEFAULT_RECORD_DURATION = 0.001  # seconds of PT recording per sample
 DEFAULT_BENCH_DURATION = 120   # seconds to run each benchmark load
 DEFAULT_SAMPLES_PER_CONFIG = 1
-DEFAULT_WARMUP_DURATION = 30   # seconds to warm up before first sample
+DEFAULT_WARMUP_DURATION = 20   # seconds to warm up before first sample
 
 # perf record -m: data_pages,aux_pages (each a power of two). Intel PT uses the AUX ring; defaults are
 # small and hot threads (e.g. mysqld) often overflow → lost chunks → empty insn decode.
@@ -134,8 +135,40 @@ def pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        # Process exists but we lack permission to signal it (common when not running as root).
+        return True
     except OSError:
         return False
+
+
+def mysql_ready_from_bench_client(host: str, *, timeout_s: int = 120) -> bool:
+    """
+    Verify MySQL is reachable from BENCH_CONTAINER network namespace.
+    This avoids false positives where mysqld is 'ready' internally but not reachable from bench-client.
+    """
+    deadline = time.monotonic() + float(timeout_s)
+    while time.monotonic() < deadline:
+        # mysqladmin is available in bench-client image; use TCP connect + auth.
+        cmd = f"mysqladmin ping -h {host} -uroot -ppassword --silent"
+        pr = docker_exec(BENCH_CONTAINER, cmd)
+        if pr.returncode == 0:
+            return True
+        time.sleep(1)
+    return False
+
+
+def sysbench_output_looks_failed(out: str, err: str) -> bool:
+    t = (out or "") + "\n" + (err or "")
+    t = t.lower()
+    # sysbench sometimes returns 0 even when Lua layer prints fatal errors.
+    bad_markers = (
+        "fatal:",
+        "unable to connect",
+        "connection creation failed",
+        "lost connection to mysql server",
+    )
+    return any(m in t for m in bad_markers)
 
 def get_child_pids(parent_pid: int) -> list[dict]:
     """Get child processes sorted by CPU usage descending."""
@@ -364,84 +397,219 @@ def build_config_matrix(project_dir: Path) -> dict[str, list[dict]]:
     nginx_conf = project_dir / "cloud_bench_configs" / "nginx-http.conf"
     haproxy_cfg = project_dir / "cloud_bench_configs" / "haproxy-http.cfg"
 
-    # Redis: in-memory only, moderate concurrency + pipelining (typical cache load).
-    redis_configs = [{
-        "config_name": "classic",
-        "server_cmd": (
-            f"docker run -d --name target-redis "
-            f"--network {NETWORK_NAME} --ip {SERVICE_IPS['redis']} "
-            f"redis:7.2-alpine redis-server --save '' --appendonly no"
-        ),
-        "bench_cmd": (
-            f"docker exec {BENCH_CONTAINER} memtier_benchmark "
-            f"-s {SERVICE_IPS['redis']} -p 6379 "
-            f"-c 50 --pipeline 32 --test-time {{bench_duration}}"
-        ),
-        "container_name": "target-redis",
-        "service_type": "redis",
-        "bench_tool": "memtier_benchmark",
-    }]
+    # Redis: vary persistence and load intensity.
+    redis_server_base = (
+        f"docker run -d --name target-redis "
+        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['redis']} "
+        f"redis:7.2-alpine redis-server "
+    )
+    redis_bench_base = (
+        f"docker exec {BENCH_CONTAINER} memtier_benchmark "
+        f"-s {SERVICE_IPS['redis']} -p 6379 "
+    )
+    redis_configs = [
+        {
+            "config_name": "classic",
+            "server_cmd": redis_server_base + "--save '' --appendonly no",
+            "bench_cmd": redis_bench_base + "-c 50 --pipeline 32 --test-time {bench_duration}",
+            "container_name": "target-redis",
+            "service_type": "redis",
+            "bench_tool": "memtier_benchmark",
+        },
+        {
+            "config_name": "lowload",
+            "server_cmd": redis_server_base + "--save '' --appendonly no",
+            "bench_cmd": redis_bench_base + "-c 10 --pipeline 8 --test-time {bench_duration}",
+            "container_name": "target-redis",
+            "service_type": "redis",
+            "bench_tool": "memtier_benchmark",
+        },
+        {
+            "config_name": "highload",
+            "server_cmd": redis_server_base + "--save '' --appendonly no",
+            "bench_cmd": redis_bench_base + "-c 200 --pipeline 64 --test-time {bench_duration}",
+            "container_name": "target-redis",
+            "service_type": "redis",
+            "bench_tool": "memtier_benchmark",
+        },
+        {
+            "config_name": "aof",
+            "server_cmd": redis_server_base + "--save '' --appendonly yes --appendfsync everysec",
+            "bench_cmd": redis_bench_base + "-c 50 --pipeline 32 --test-time {bench_duration}",
+            "container_name": "target-redis",
+            "service_type": "redis",
+            "bench_tool": "memtier_benchmark",
+        },
+        {
+            "config_name": "maxmem256m",
+            "server_cmd": redis_server_base + "--save '' --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru",
+            "bench_cmd": redis_bench_base + "-c 50 --pipeline 32 --test-time {bench_duration}",
+            "container_name": "target-redis",
+            "service_type": "redis",
+            "bench_tool": "memtier_benchmark",
+        },
+    ]
 
-    # Nginx: multi-worker static small file (common edge pattern).
-    nginx_configs = [{
-        "config_name": "classic",
-        "server_cmd": (
-            f"docker run -d --name target-nginx "
-            f"--network {NETWORK_NAME} --ip {SERVICE_IPS['nginx']} "
-            f"-v {project_dir}/www:/usr/share/nginx/html:ro "
-            f"-v {nginx_conf}:/etc/nginx/nginx.conf:ro "
-            f"-e NGINX_WORKER_PROCESSES=4 "
-            f"nginx:alpine"
-        ),
-        "bench_cmd": (
-            f"docker exec {BENCH_CONTAINER} wrk "
-            f"-t2 -c 50 -d {{bench_duration}}s "
-            f"http://{SERVICE_IPS['nginx']}/index.html"
-        ),
-        "container_name": "target-nginx",
-        "service_type": "nginx",
-        "bench_tool": "wrk",
-    }]
+    # Nginx: vary worker count and request size/connection pressure.
+    nginx_server_base = (
+        f"docker run -d --name target-nginx "
+        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['nginx']} "
+        f"-v {project_dir}/www:/usr/share/nginx/html:ro "
+        f"-v {nginx_conf}:/etc/nginx/nginx.conf:ro "
+        f"nginx:alpine"
+    )
+    nginx_configs = [
+        {
+            "config_name": "w1_small",
+            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=1",
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 30 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/index.html",
+            "container_name": "target-nginx",
+            "service_type": "nginx",
+            "bench_tool": "wrk",
+        },
+        {
+            "config_name": "w4_small",
+            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=4",
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 50 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/index.html",
+            "container_name": "target-nginx",
+            "service_type": "nginx",
+            "bench_tool": "wrk",
+        },
+        {
+            "config_name": "w8_small",
+            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=8",
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t4 -c 200 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/index.html",
+            "container_name": "target-nginx",
+            "service_type": "nginx",
+            "bench_tool": "wrk",
+        },
+        {
+            "config_name": "w4_1k",
+            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=4",
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 80 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/1k.bin",
+            "container_name": "target-nginx",
+            "service_type": "nginx",
+            "bench_tool": "wrk",
+        },
+        {
+            "config_name": "w4_64k",
+            "server_cmd": nginx_server_base + " -e NGINX_WORKER_PROCESSES=4",
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 30 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/64k.bin",
+            "container_name": "target-nginx",
+            "service_type": "nginx",
+            "bench_tool": "wrk",
+        },
+    ]
 
-    # HAProxy: L7 HTTP to backend nginx, moderate connections.
-    haproxy_configs = [{
-        "config_name": "classic",
-        "server_cmd": (
-            f"docker run -d --name target-haproxy "
-            f"--network {NETWORK_NAME} --ip {SERVICE_IPS['haproxy']} "
-            f"-v {haproxy_cfg}:/usr/local/etc/haproxy/haproxy.cfg:ro "
-            f"haproxy:2.8"
-        ),
-        "bench_cmd": (
-            f"docker exec {BENCH_CONTAINER} wrk "
-            f"-t2 -c 100 -d {{bench_duration}}s "
-            f"http://{SERVICE_IPS['haproxy']}:9000/"
-        ),
-        "container_name": "target-haproxy",
-        "service_type": "haproxy",
-        "bench_tool": "wrk",
-        "needs_nginx_backend": True,
-    }]
+    # HAProxy: vary concurrency and thread mode via env (config file may or may not use it; still changes runtime).
+    haproxy_server_base = (
+        f"docker run -d --name target-haproxy "
+        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['haproxy']} "
+        f"-v {haproxy_cfg}:/usr/local/etc/haproxy/haproxy.cfg:ro "
+        f"haproxy:2.8"
+    )
+    haproxy_configs = [
+        {
+            "config_name": "lowconn",
+            "server_cmd": haproxy_server_base,
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 30 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/",
+            "container_name": "target-haproxy",
+            "service_type": "haproxy",
+            "bench_tool": "wrk",
+            "needs_nginx_backend": True,
+        },
+        {
+            "config_name": "classic",
+            "server_cmd": haproxy_server_base,
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 100 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/",
+            "container_name": "target-haproxy",
+            "service_type": "haproxy",
+            "bench_tool": "wrk",
+            "needs_nginx_backend": True,
+        },
+        {
+            "config_name": "highconn",
+            "server_cmd": haproxy_server_base,
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t4 -c 400 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/",
+            "container_name": "target-haproxy",
+            "service_type": "haproxy",
+            "bench_tool": "wrk",
+            "needs_nginx_backend": True,
+        },
+        {
+            "config_name": "shortreq",
+            "server_cmd": haproxy_server_base,
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 150 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/1k.bin",
+            "container_name": "target-haproxy",
+            "service_type": "haproxy",
+            "bench_tool": "wrk",
+            "needs_nginx_backend": True,
+        },
+        {
+            "config_name": "largereq",
+            "server_cmd": haproxy_server_base,
+            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 50 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/64k.bin",
+            "container_name": "target-haproxy",
+            "service_type": "haproxy",
+            "bench_tool": "wrk",
+            "needs_nginx_backend": True,
+        },
+    ]
 
-    # PostgreSQL: small read/write pgbench after init-scale 2.
-    postgres_configs = [{
-        "config_name": "classic",
-        "server_cmd": (
-            f"docker run -d --name target-postgres "
-            f"--network {NETWORK_NAME} --ip {SERVICE_IPS['postgres']} "
-            f"-e POSTGRES_PASSWORD=password "
-            f"postgres:15-alpine postgres -c shared_buffers=512MB"
-        ),
-        "bench_cmd": (
-            f"docker exec target-postgres pgbench "
-            f"-c 4 -j 2 -T {{bench_duration}} -N "
-            f"-h localhost -U postgres postgres"
-        ),
-        "container_name": "target-postgres",
-        "service_type": "postgres",
-        "bench_tool": "pgbench",
-        "needs_pgbench_init": True,
-    }]
+    # PostgreSQL: vary shared_buffers and client pressure.
+    pg_server = (
+        f"docker run -d --name target-postgres "
+        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['postgres']} "
+        f"-e POSTGRES_PASSWORD=password "
+        f"postgres:15-alpine postgres "
+    )
+    postgres_configs = [
+        {
+            "config_name": "buf128_c2",
+            "server_cmd": pg_server + "-c shared_buffers=128MB",
+            "bench_cmd": f"docker exec target-postgres pgbench -c 2 -j 2 -T {{bench_duration}} -N -h localhost -U postgres postgres",
+            "container_name": "target-postgres",
+            "service_type": "postgres",
+            "bench_tool": "pgbench",
+            "needs_pgbench_init": True,
+        },
+        {
+            "config_name": "buf512_c4",
+            "server_cmd": pg_server + "-c shared_buffers=512MB",
+            "bench_cmd": f"docker exec target-postgres pgbench -c 4 -j 2 -T {{bench_duration}} -N -h localhost -U postgres postgres",
+            "container_name": "target-postgres",
+            "service_type": "postgres",
+            "bench_tool": "pgbench",
+            "needs_pgbench_init": True,
+        },
+        {
+            "config_name": "buf1g_c8",
+            "server_cmd": pg_server + "-c shared_buffers=1GB",
+            "bench_cmd": f"docker exec target-postgres pgbench -c 8 -j 4 -T {{bench_duration}} -N -h localhost -U postgres postgres",
+            "container_name": "target-postgres",
+            "service_type": "postgres",
+            "bench_tool": "pgbench",
+            "needs_pgbench_init": True,
+        },
+        {
+            "config_name": "ro_c8",
+            "server_cmd": pg_server + "-c shared_buffers=512MB",
+            "bench_cmd": f"docker exec target-postgres pgbench -c 8 -j 4 -T {{bench_duration}} -S -h localhost -U postgres postgres",
+            "container_name": "target-postgres",
+            "service_type": "postgres",
+            "bench_tool": "pgbench",
+            "needs_pgbench_init": True,
+        },
+        {
+            "config_name": "rw_c8",
+            "server_cmd": pg_server + "-c shared_buffers=512MB",
+            "bench_cmd": f"docker exec target-postgres pgbench -c 8 -j 4 -T {{bench_duration}} -h localhost -U postgres postgres",
+            "container_name": "target-postgres",
+            "service_type": "postgres",
+            "bench_tool": "pgbench",
+            "needs_pgbench_init": True,
+        },
+    ]
 
     # MySQL: use sysbench from bench-client (time-based). The mysql:8.0 server image does not
     # ship mysqlslap by default, which would make the load exit immediately and yield 0 samples.
@@ -452,49 +620,100 @@ def build_config_matrix(project_dir: Path) -> dict[str, list[dict]]:
         f"--mysql-password=password --mysql-db=test --mysql-ssl=off "
         f"--tables=8 --table-size=10000 --threads=16"
     )
-    mysql_configs = [{
-        "config_name": "classic",
-        "server_cmd": (
-            f"docker run -d --name target-mysql "
-            f"--network {NETWORK_NAME} --ip {SERVICE_IPS['mysql']} "
-            f"-e MYSQL_ROOT_PASSWORD=password "
-            f"-e MYSQL_DATABASE=test "
-            f"{DOCKER_MYSQL_IMAGE}"
-        ),
-        "sysbench_mysql_prepare_cmd": (
-            f"docker exec {BENCH_CONTAINER} sh -lc "
-            f"\"set -e; sysbench oltp_read_write {_sb_mysql_args} prepare\""
-        ),
-        "bench_cmd": (
-            f"docker exec {BENCH_CONTAINER} sh -lc "
-            f"\"set -e; "
-            f"sysbench oltp_read_write {_sb_mysql_args} --time={{bench_duration}} --report-interval=10 run; "
-            f"sysbench oltp_read_write {_sb_mysql_args} cleanup >/dev/null\""
-        ),
-        "container_name": "target-mysql",
-        "service_type": "mysql",
-        "bench_tool": "sysbench",
-        "needs_mysql_ready": True,
-    }]
+    mysql_server_base = (
+        f"docker run -d --name target-mysql "
+        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['mysql']} "
+        f"-e MYSQL_ROOT_PASSWORD=password "
+        f"-e MYSQL_DATABASE=test "
+        f"{DOCKER_MYSQL_IMAGE} "
+    )
+    mysql_cfgs = [
+        ("buf256m_t8", "--innodb-buffer-pool-size=256M", "--threads=8"),
+        ("buf256m_t32", "--innodb-buffer-pool-size=256M", "--threads=32"),
+        ("buf1g_t16", "--innodb-buffer-pool-size=1G", "--threads=16"),
+        ("t64", "--innodb-buffer-pool-size=512M", "--threads=64"),
+        ("classic", "--innodb-buffer-pool-size=512M", "--threads=16"),
+    ]
+    mysql_configs = []
+    for cfg_name, mysqld_args, sb_threads in mysql_cfgs:
+        sb_args = (
+            f"--db-driver=mysql --mysql-host={SERVICE_IPS['mysql']} --mysql-user=root "
+            f"--mysql-password=password --mysql-db=test --mysql-ssl=off "
+            f"--tables=8 --table-size=10000 {sb_threads}"
+        )
+        mysql_configs.append(
+            {
+                "config_name": cfg_name,
+                "server_cmd": mysql_server_base + mysqld_args,
+                "sysbench_mysql_prepare_cmd": (
+                    f"docker exec {BENCH_CONTAINER} sh -lc "
+                    f"\"set -e; sysbench oltp_read_write {sb_args} prepare\""
+                ),
+                "bench_cmd": (
+                    f"docker exec {BENCH_CONTAINER} sh -lc "
+                    f"\"set -e; "
+                    f"sysbench oltp_read_write {sb_args} --time={{bench_duration}} --report-interval=10 run; "
+                    f"sysbench oltp_read_write {sb_args} cleanup >/dev/null\""
+                ),
+                "container_name": "target-mysql",
+                "service_type": "mysql",
+                "bench_tool": "sysbench",
+                "needs_mysql_ready": True,
+            }
+        )
 
-    # Memcached: multi-threaded daemon; memtier speaks memcache_binary (same bench-client as Redis).
-    memcached_configs = [{
-        "config_name": "classic",
-        "server_cmd": (
-            f"docker run -d --name target-memcached "
-            f"--network {NETWORK_NAME} --ip {SERVICE_IPS['memcached']} "
-            f"{DOCKER_MEMCACHED_IMAGE} -m 256 -t 4"
-        ),
-        "bench_cmd": (
-            f"docker exec {BENCH_CONTAINER} memtier_benchmark "
-            f"-s {SERVICE_IPS['memcached']} -p 11211 "
-            f"--protocol=memcache_binary "
-            f"-c 50 --test-time {{bench_duration}}"
-        ),
-        "container_name": "target-memcached",
-        "service_type": "memcached",
-        "bench_tool": "memtier_benchmark",
-    }]
+    # Memcached: vary memory size, thread count, and client pressure.
+    memc_server_base = (
+        f"docker run -d --name target-memcached "
+        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['memcached']} "
+        f"{DOCKER_MEMCACHED_IMAGE} "
+    )
+    memc_bench_base = (
+        f"docker exec {BENCH_CONTAINER} memtier_benchmark "
+        f"-s {SERVICE_IPS['memcached']} -p 11211 --protocol=memcache_binary "
+    )
+    memcached_configs = [
+        {
+            "config_name": "m64_t2_low",
+            "server_cmd": memc_server_base + "-m 64 -t 2",
+            "bench_cmd": memc_bench_base + "-c 20 --test-time {bench_duration}",
+            "container_name": "target-memcached",
+            "service_type": "memcached",
+            "bench_tool": "memtier_benchmark",
+        },
+        {
+            "config_name": "m256_t4",
+            "server_cmd": memc_server_base + "-m 256 -t 4",
+            "bench_cmd": memc_bench_base + "-c 50 --test-time {bench_duration}",
+            "container_name": "target-memcached",
+            "service_type": "memcached",
+            "bench_tool": "memtier_benchmark",
+        },
+        {
+            "config_name": "m512_t4",
+            "server_cmd": memc_server_base + "-m 512 -t 4",
+            "bench_cmd": memc_bench_base + "-c 50 --test-time {bench_duration}",
+            "container_name": "target-memcached",
+            "service_type": "memcached",
+            "bench_tool": "memtier_benchmark",
+        },
+        {
+            "config_name": "m256_t8",
+            "server_cmd": memc_server_base + "-m 256 -t 8",
+            "bench_cmd": memc_bench_base + "-c 80 --test-time {bench_duration}",
+            "container_name": "target-memcached",
+            "service_type": "memcached",
+            "bench_tool": "memtier_benchmark",
+        },
+        {
+            "config_name": "m256_t4_high",
+            "server_cmd": memc_server_base + "-m 256 -t 4",
+            "bench_cmd": memc_bench_base + "-c 200 --test-time {bench_duration}",
+            "container_name": "target-memcached",
+            "service_type": "memcached",
+            "bench_tool": "memtier_benchmark",
+        },
+    ]
 
     return {
         "redis": redis_configs,
@@ -649,16 +868,20 @@ def collect_traces_for_config(
     bench_process: subprocess.Popen,
     perf_mmap_pages: str,
     intel_pt_event: str,
+    start_index: int = 0,
 ):
     """
     Periodically record PT traces from a single worker thread (TID).
     Uses `perf record -t TID` to trace only the specified thread.
     Output files: perf.<bench_name>.<sample_index>.data
     """
-    sample_count = 0
+    sample_count = int(start_index)
     start_time = time.time()
 
-    log("📊", f"Sampling TID {worker_tid} every {interval}s (max {max_samples} samples)...")
+    log(
+        "📊",
+        f"Sampling TID {worker_tid} every {interval}s (target {max_samples} samples; starting at {sample_count})...",
+    )
     log("🔬", f"perf record -m {perf_mmap_pages} (data,aux mmap pages)")
 
     while sample_count < max_samples:
@@ -675,6 +898,9 @@ def collect_traces_for_config(
         sample_count += 1
         elapsed = time.time() - start_time
         pt_path = output_dir / f"perf.{bench_name}.{sample_count}.data"
+        if pt_path.exists():
+            log("⚠️", f"{pt_path.name} already exists; skipping index {sample_count}")
+            continue
 
         run_cmd([
             str(perf_tool), "record",
@@ -709,6 +935,8 @@ def run_single_config(
     max_samples: int,
     warmup_duration: int = DEFAULT_WARMUP_DURATION,
     cli_args: argparse.Namespace | None = None,
+    *,
+    inline_postprocess: bool = True,
 ):
     """Run one service config: optional PT capture, then perf script + recover (unless disabled)."""
     service_type = config["service_type"]
@@ -716,15 +944,25 @@ def run_single_config(
     container_name = config["container_name"]
     bench_name = f"{service_type}.{config_name}"
 
-    has_perf = (output_dir / f"perf.{bench_name}.1.data").is_file()
+    existing_samples = iter_perf_data_files(output_dir, bench_name)
+    existing_n = len(existing_samples)
+    has_perf = existing_n > 0
     post_complete = cloud_postprocess_reports_complete(output_dir, bench_name)
     # Do not skip re-collection when perf.data is left over from a failed decode/recover run.
-    skip_collect = has_perf and post_complete
+    skip_collect = has_perf and post_complete and existing_n >= max_samples
     if skip_collect:
-        log("⏭️", f"Skipping {bench_name} trace collection (perf + analysis already complete)")
+        log(
+            "⏭️",
+            f"Skipping {bench_name} trace collection (perf + analysis already complete: samples={existing_n})",
+        )
     else:
         if has_perf and not post_complete:
             log("♻️", f"{bench_name}: perf.data exists but analysis missing — re-collecting PT")
+        elif has_perf and post_complete and existing_n < max_samples:
+            log(
+                "➕",
+                f"{bench_name}: have {existing_n} sample(s), need {max_samples}; collecting more samples…",
+            )
         print(f"\n{'─' * 60}")
         print(f"  🧪  {bench_name}")
         print(f"{'─' * 60}")
@@ -771,6 +1009,11 @@ def run_single_config(
                 log("❌", "MySQL did not become ready in time")
                 docker_stop_rm(container_name)
                 return
+            # Critical: verify bench-client can actually reach mysqld.
+            if not mysql_ready_from_bench_client(SERVICE_IPS["mysql"], timeout_s=120):
+                log("❌", "MySQL not reachable from bench-client (network/connectivity)")
+                docker_stop_rm(container_name)
+                return
 
         # ── sysbench prepare (MySQL): must finish before run+warmup+PT ─────────
         if config.get("sysbench_mysql_prepare_cmd"):
@@ -795,6 +1038,16 @@ def run_single_config(
                 if live and not err:
                     err = "(see messages above)"
                 log("❌", f"sysbench prepare failed (rc={pr.returncode}): {err}")
+                docker_stop_rm(container_name)
+                return
+            if not live and sysbench_output_looks_failed(pr.stdout or "", pr.stderr or ""):
+                log("❌", "sysbench prepare reported FATAL/connection errors (treat as failure)")
+                if pr.stdout and pr.stdout.strip():
+                    for line in pr.stdout.strip().splitlines()[-12:]:
+                        log("📋", f"  prepare out: {line}")
+                if pr.stderr and pr.stderr.strip():
+                    for line in pr.stderr.strip().splitlines()[-12:]:
+                        log("📋", f"  prepare err: {line}")
                 docker_stop_rm(container_name)
                 return
             log("✅", f"sysbench prepare done in {prep_elapsed:.1f}s")
@@ -876,6 +1129,7 @@ def run_single_config(
             bench_process=bench_process,
             perf_mmap_pages=mmap_pages,
             intel_pt_event=pt_event,
+            start_index=existing_n if (has_perf and post_complete and existing_n < max_samples) else 0,
         )
 
         # ── Cleanup ───────────────────────────────────────────────────────
@@ -887,7 +1141,7 @@ def run_single_config(
 
         log("✅", f"{bench_name} done — {sample_count} samples collected.\n")
 
-    if cli_args is not None and not cli_args.no_post_process:
+    if inline_postprocess and cli_args is not None and not cli_args.no_post_process:
         if iter_perf_data_files(output_dir, bench_name):
             try:
                 cloud_run_perf_postprocess(
@@ -943,6 +1197,17 @@ def main():
         "--stop-on-post-error",
         action="store_true",
         help="Abort the whole run if post-processing fails for one config",
+    )
+    parser.add_argument(
+        "--post-process-mode",
+        type=str,
+        choices=["inline", "batch"],
+        default="batch",
+        help=(
+            "When to run post-processing. "
+            "'inline': after each config finishes collecting. "
+            "'batch' (default): collect all perf.data first, then post-process benches in parallel via --post-workers."
+        ),
     )
     parser.add_argument(
         "--verbose-post",
@@ -1032,6 +1297,7 @@ def main():
     print(f"📊 Post-process: {'off' if args.no_post_process else 'perf script + recover_mem_addrs_uc'}\n")
 
     config_index = 0
+    benches_for_post: set[str] = set()
     for service_name in services_to_run:
         service_configs = all_configs[service_name]
         log("📦", f"=== Service: {service_name} ({len(service_configs)} configs) ===")
@@ -1052,7 +1318,35 @@ def main():
                 max_samples=args.samples_per_config,
                 warmup_duration=args.warmup_duration,
                 cli_args=args,
+                inline_postprocess=(args.post_process_mode == "inline"),
             )
+            if not args.no_post_process and args.post_process_mode == "batch":
+                bench_name = f"{config['service_type']}.{config['config_name']}"
+                benches_for_post.add(bench_name)
+
+    if not args.no_post_process and args.post_process_mode == "batch" and benches_for_post:
+        workers = max(1, int(getattr(args, "post_workers", 8)))
+        log("🧰", f"Batch post-process: benches={len(benches_for_post)} workers={workers}")
+        fut_map: dict[concurrent.futures.Future[None], str] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(benches_for_post))) as ex:
+            for bench_name in sorted(benches_for_post):
+                fut = ex.submit(
+                    cloud_run_perf_postprocess,
+                    script_dir=SCRIPT_DIR,
+                    output_dir=output_dir,
+                    bench_name=bench_name,
+                    perf_tool=perf_tool,
+                    args=args,
+                )
+                fut_map[fut] = bench_name
+            for fut in concurrent.futures.as_completed(fut_map):
+                bench_name = fut_map[fut]
+                try:
+                    fut.result()
+                except Exception as e:
+                    log("❌", f"Post-process failed for {bench_name}: {e}")
+                    if args.stop_on_post_error:
+                        raise
 
     # Final cleanup
     docker_stop_rm(BENCH_CONTAINER)

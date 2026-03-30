@@ -32,13 +32,13 @@ def main() -> int:
         default=Path("/home/huangtianhao/speccpu2017"),
         help="SPEC CPU root",
     )
-    ap.add_argument("--warmup-sweep", type=str, default="60,120", help="comma list, e.g. 60,120")
-    ap.add_argument("--total-insns", type=int, default=2_000_000)
+    ap.add_argument("--warmup-sweep", type=str, default="10", help="comma list, e.g. 60,120")
+    ap.add_argument("--total-insns", type=int, default=5_000_000)
     ap.add_argument("--line-size", type=int, default=64)
     ap.add_argument("--perf-record-seconds", type=float, default=0.001)
     ap.add_argument("--perf-mmap-pages", type=int, default=1024, help="perf record -m pages (PT buffer size)")
     ap.add_argument("--perf-event", type=str, default="intel_pt/cyc,noretcomp=0/u")
-    ap.add_argument("--perf-max-insn-lines", type=int, default=500_000)
+    ap.add_argument("--perf-max-insn-lines", type=int, default=5_000_000)
     ap.add_argument("--trace-post-sde-sleep", type=float, default=8.0)
     ap.add_argument("--trace-settle-timeout", type=float, default=300.0)
     ap.add_argument("--trace-settle-interval", type=float, default=1.0)
@@ -110,6 +110,30 @@ def main() -> int:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Second perf script with --xed + instruction portrait JSON (perf needs Intel XED)",
+    )
+    ap.add_argument(
+        "--perf-stream-sampling",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Perf-only: run benchmark once and sample perf.data periodically until exit (incompatible with SDE).",
+    )
+    ap.add_argument(
+        "--perf-stream-interval",
+        type=float,
+        default=15.0,
+        help="Perf-only stream sampling interval seconds (default: 10).",
+    )
+    ap.add_argument(
+        "--perf-stream-first-after",
+        type=float,
+        default=10.0,
+        help="First sample time offset in seconds since benchmark start (default: 10).",
+    )
+    ap.add_argument(
+        "--perf-stream-max-samples",
+        type=int,
+        default=5,
+        help="Max samples per benchmark in stream mode (0 = unlimited until exit).",
     )
     args = ap.parse_args()
 

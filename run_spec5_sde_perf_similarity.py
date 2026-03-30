@@ -773,8 +773,163 @@ def run_trace_phase(
     return PreparedCase(seq=seq, layout=layout)
 
 
+def run_trace_phase_perf_stream(
+    *,
+    seq_base: int,
+    bench: str,
+    script_dir: Path,
+    spec_root: Path,
+    run_dir: Path,
+    args: argparse.Namespace,
+) -> list[PreparedCase]:
+    """
+    Perf-only stream sampling mode:
+      run benchmark once, then take perf.data samples every interval seconds until it exits.
+
+    Each sample is materialized as its own CaseLayout under <output-base>/<bench>/<t>s/.
+    This mode is incompatible with SDE (which requires restarting for each warmup).
+    """
+    if getattr(args, "enable_sde", False):
+        raise RuntimeError("perf stream sampling mode does not support --enable-sde")
+    interval = float(getattr(args, "perf_stream_interval", 10.0))
+    first_after = float(getattr(args, "perf_stream_first_after", interval))
+    max_samples = int(getattr(args, "perf_stream_max_samples", 0))
+    if interval <= 0:
+        raise RuntimeError("--perf-stream-interval must be > 0")
+    if first_after < 0:
+        raise RuntimeError("--perf-stream-first-after must be >= 0")
+    if max_samples < 0:
+        raise RuntimeError("--perf-stream-max-samples must be >= 0")
+
+    cmd_line = extract_cmd_line(spec_root, run_dir)
+    exe_basename = Path(shlex.split(cmd_line)[0]).name
+
+    # Put the benchmark stdout/stderr into a stable location (not per-sample).
+    stream_dir = args.output_base / bench / "_stream"
+    stream_report = stream_dir / "report"
+    stream_report.mkdir(parents=True, exist_ok=True)
+    out_path = stream_report / f"{bench.replace('.', '_')}.spec.perf.stdout.txt"
+    err_path = stream_report / f"{bench.replace('.', '_')}.spec.perf.stderr.txt"
+
+    with out_path.open("w", encoding="utf-8") as out_fp, err_path.open("w", encoding="utf-8") as err_fp:
+        launcher = subprocess.Popen(
+            ["bash", "-lc", f"exec {cmd_line}"],
+            cwd=run_dir,
+            stdout=out_fp,
+            stderr=err_fp,
+            text=True,
+        )
+
+    launcher_pid = int(launcher.pid)
+    time.sleep(1.0)
+    if not pid_alive(launcher_pid):
+        raise RuntimeError("perf stream launcher failed to start")
+    target_pid = resolve_target_pid(launcher_pid, exe_basename, timeout_s=8.0)
+    if not pid_alive(target_pid):
+        cleanup_pid(launcher_pid)
+        raise RuntimeError("benchmark exited before perf stream sampling")
+
+    prepared: list[PreparedCase] = []
+    start_t = time.time()
+    next_at = float(first_after)
+    sample_idx = 0
+    try:
+        while True:
+            if max_samples > 0 and sample_idx >= max_samples:
+                break
+            if not pid_alive(target_pid):
+                break
+
+            # Wait until the next sampling timestamp.
+            deadline = start_t + next_at
+            while time.time() < deadline:
+                if not pid_alive(target_pid):
+                    break
+                time.sleep(0.05)
+            if not pid_alive(target_pid):
+                break
+
+            # Materialize one sample as its own case (warmup_seconds = time since start).
+            layout = make_case_layout(bench=bench, warmup_seconds=next_at, output_base=args.output_base)
+            try:
+                run_step(
+                    [
+                        "perf",
+                        "record",
+                        "-q",
+                        "-m",
+                        str(args.perf_mmap_pages),
+                        "-e",
+                        args.perf_event,
+                        "-o",
+                        str(layout.perf_data),
+                        "-p",
+                        str(target_pid),
+                        "--",
+                        "sleep",
+                        str(args.perf_record_seconds),
+                    ],
+                    verbose=args.verbose,
+                    stderr_path=layout.perf_record_stderr,
+                )
+            except Exception:
+                # Common race: benchmark exits between the alive check and perf attach.
+                # In that case, keep already collected samples and stop sampling gracefully.
+                if not pid_alive(target_pid):
+                    break
+                raise
+            if not layout.perf_data.exists() or layout.perf_data.stat().st_size == 0:
+                if not pid_alive(target_pid):
+                    break
+                raise RuntimeError("empty perf.data in perf stream sampling")
+            prepared.append(PreparedCase(seq=seq_base + sample_idx, layout=layout))
+            sample_idx += 1
+            next_at += interval
+    finally:
+        # Ensure benchmark is terminated if still alive.
+        cleanup_pid(target_pid)
+        if target_pid != launcher_pid:
+            cleanup_pid(launcher_pid)
+        try:
+            launcher.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+    return prepared
+
+
 def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.Namespace) -> RunCase:
     layout = prepared.layout
+    skip_existing = bool(getattr(args, "skip_existing", True))
+
+    def _nonempty(p: Path) -> bool:
+        try:
+            return p.is_file() and p.stat().st_size > 0
+        except OSError:
+            return False
+
+    # Fast path: reuse existing perf post-process artifacts if present.
+    if skip_existing and _nonempty(layout.perf_data_analysis_json) and _nonempty(layout.perf_inst_analysis_json):
+        metrics: dict = {"mode": "reuse_existing"}
+        metrics["perf_inst_analysis_json"] = str(layout.perf_inst_analysis_json)
+        metrics["perf_data_analysis_json"] = str(layout.perf_data_analysis_json)
+        # Reuse portrait metrics if requested and available.
+        if getattr(args, "insn_portrait", False) and _nonempty(layout.insn_portrait_json):
+            try:
+                rep = json.loads(layout.insn_portrait_json.read_text(encoding="utf-8"))
+                metrics.update(insn_portrait.flatten_portrait_metrics(rep))
+                metrics["perf_insn_portrait_json"] = str(layout.insn_portrait_json)
+                metrics["trace_profile_merged_json"] = str(layout.trace_profile_merged_json)
+            except Exception:
+                pass
+        return RunCase(
+            bench=layout.bench,
+            warmup=layout.warmup,
+            status="ok",
+            out_dir=str(layout.out_dir),
+            metrics=metrics,
+        )
+
     if args.enable_sde:
         sde_analyzer = script_dir / "analyze_sde_trace_uc"
         if not sde_analyzer.exists():
@@ -971,7 +1126,10 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
     if args.enable_sde and not args.sde.exists():
         raise SystemExit(f"sde not found: {args.sde}")
 
-    warmups = parse_warmups(args.warmup_sweep)
+    use_stream = bool(getattr(args, "perf_stream_sampling", False)) and not bool(
+        getattr(args, "enable_sde", False)
+    )
+    warmups = [] if use_stream else parse_warmups(args.warmup_sweep)
     all_benches = sorted(p.name for p in spec_cpu.iterdir() if p.is_dir() and p.name.startswith("5") and p.name.endswith("_r"))
     if args.benchmarks.strip():
         benches = [x.strip() for x in args.benchmarks.split(",") if x.strip()]
@@ -986,7 +1144,15 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
 
     root = script_dir if script_dir is not None else Path(__file__).resolve().parent
     summary: list[RunCase] = []
-    print(f"[batch] benches={len(benches)} warmups={warmups}")
+    if use_stream:
+        print(
+            f"[batch] benches={len(benches)} perf_stream_sampling=true "
+            f"interval={getattr(args,'perf_stream_interval',10.0)}s "
+            f"first_after={getattr(args,'perf_stream_first_after',getattr(args,'perf_stream_interval',10.0))}s "
+            f"max_samples={getattr(args,'perf_stream_max_samples',0)}"
+        )
+    else:
+        print(f"[batch] benches={len(benches)} warmups={warmups}")
     bench_run_dirs: dict[str, Path] = {}
     for bench in benches:
         bench_dir = spec_cpu / bench
@@ -1002,7 +1168,9 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
             continue
         bench_run_dirs[bench] = run_dir
 
-    total_cases = sum(len(warmups) for b in benches if b in bench_run_dirs)
+    total_cases = sum(len(warmups) for b in benches if b in bench_run_dirs) if not use_stream else sum(
+        1 for b in benches if b in bench_run_dirs
+    )
     print(f"[plan] runnable_cases={total_cases}")
 
     prepared_cases: list[PreparedCase] = []
@@ -1013,30 +1181,59 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
         run_dir = bench_run_dirs.get(bench)
         if run_dir is None:
             continue
-        for w in warmups:
+        if use_stream:
             trace_idx += 1
-            print(f"[trace {trace_idx}/{total_cases}] bench={bench} warmup={w:g}s")
+            print(f"[trace {trace_idx}/{total_cases}] bench={bench} mode=stream")
             try:
-                layout = make_case_layout(bench=bench, warmup_seconds=w, output_base=args.output_base)
-                prepared = run_trace_phase(
-                    seq=seq,
-                    layout=layout,
+                prepared_list = run_trace_phase_perf_stream(
+                    seq_base=seq,
+                    bench=bench,
                     script_dir=root,
                     spec_root=args.spec_root,
-                    sde_path=args.sde,
                     run_dir=run_dir,
                     args=args,
                 )
-                prepared_cases.append(prepared)
-                seq += 1
-                print(f"  traced: perf_data=ok out={layout.out_dir}")
+                prepared_cases.extend(prepared_list)
+                seq += len(prepared_list)
+                print(f"  traced: samples={len(prepared_list)} out={args.output_base / bench}")
             except Exception as e:
                 msg = str(e)
                 print(f"  error: {msg}")
-                summary.append(RunCase(bench=bench, warmup=w, status="error", out_dir="", error=msg))
+                summary.append(RunCase(bench=bench, warmup=-1, status="error", out_dir="", error=msg))
                 if args.stop_on_error:
                     stop_now = True
-                    break
+        else:
+            for w in warmups:
+                trace_idx += 1
+                print(f"[trace {trace_idx}/{total_cases}] bench={bench} warmup={w:g}s")
+                try:
+                    layout = make_case_layout(bench=bench, warmup_seconds=w, output_base=args.output_base)
+                    # If post-process outputs already exist, skip trace collection and just schedule post phase
+                    # (which will reuse existing outputs when --skip-existing is on).
+                    if bool(getattr(args, "skip_existing", True)) and layout.perf_data_analysis_json.is_file() and layout.perf_inst_analysis_json.is_file():
+                        prepared_cases.append(PreparedCase(seq=seq, layout=layout))
+                        seq += 1
+                        print(f"  skip trace: existing analysis json out={layout.out_dir}")
+                        continue
+                    prepared = run_trace_phase(
+                        seq=seq,
+                        layout=layout,
+                        script_dir=root,
+                        spec_root=args.spec_root,
+                        sde_path=args.sde,
+                        run_dir=run_dir,
+                        args=args,
+                    )
+                    prepared_cases.append(prepared)
+                    seq += 1
+                    print(f"  traced: perf_data=ok out={layout.out_dir}")
+                except Exception as e:
+                    msg = str(e)
+                    print(f"  error: {msg}")
+                    summary.append(RunCase(bench=bench, warmup=w, status="error", out_dir="", error=msg))
+                    if args.stop_on_error:
+                        stop_now = True
+                        break
         if stop_now:
             break
     if prepared_cases:
@@ -1171,7 +1368,7 @@ def main() -> int:
         help="enable SDE trace and SDE-vs-perf comparison; for perf-only SPEC batch prefer run_spec5_perf_trace_analysis.py",
     )
     ap.add_argument("--warmup-sweep", type=str, default="60,120", help="comma list, e.g. 60,120")
-    ap.add_argument("--total-insns", type=int, default=2_000_000)
+    ap.add_argument("--total-insns", type=int, default=5_000_000)
     # Perf post-process args (shared with cloud pipeline)
     add_perf_postprocess_args(ap)
     ap.add_argument("--stride-top-k", type=int, default=20)
@@ -1209,6 +1406,36 @@ def main() -> int:
     )
     ap.add_argument("--stop-on-error", action="store_true", help="stop batch immediately on first failure")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument(
+        "--skip-existing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip trace/post when analysis outputs already exist (default: true).",
+    )
+    ap.add_argument(
+        "--perf-stream-sampling",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Perf-only: run benchmark once and sample perf.data periodically until exit (incompatible with SDE).",
+    )
+    ap.add_argument(
+        "--perf-stream-interval",
+        type=float,
+        default=10.0,
+        help="Perf-only stream sampling interval seconds (default: 10).",
+    )
+    ap.add_argument(
+        "--perf-stream-first-after",
+        type=float,
+        default=10.0,
+        help="First sample time offset in seconds since benchmark start (default: 10).",
+    )
+    ap.add_argument(
+        "--perf-stream-max-samples",
+        type=int,
+        default=0,
+        help="Max samples per benchmark in stream mode (0 = unlimited until exit).",
+    )
     ap.add_argument(
         "--export-full-features",
         action=argparse.BooleanOptionalAction,

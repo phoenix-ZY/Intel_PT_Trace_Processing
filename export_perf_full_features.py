@@ -276,7 +276,7 @@ def _predefined_cols() -> dict[str, list[str]]:
         "65537-262144",
         ">=262144",
     ]
-    loc = (
+    loc_common = (
         [f"rd_prob::{b}" for b in rd_bins]
         + [f"stride_prob::{b}" for b in stride_bins]
         + [
@@ -287,7 +287,10 @@ def _predefined_cols() -> dict[str, list[str]]:
             "stride_far_mass_abs_gt_64",
             "stride_forward_ratio",
             "stride_backward_ratio",
-            # prefetch proxies (may be absent for inst; zeros are fine)
+        ]
+    )
+    loc_data = loc_common + [
+        # prefetch proxies (data only)
             "prefetch_nl_accuracy_proxy",
             "prefetch_nl_coverage_proxy",
             "prefetch_nl_pollution_proxy",
@@ -300,8 +303,8 @@ def _predefined_cols() -> dict[str, list[str]]:
             "prefetch_stream_far_jump_proxy",
             "prefetch_stream_forward_le4_proxy",
             "prefetch_zero_delta_proxy",
-        ]
-    )
+    ]
+    loc_inst = loc_common
     mix = [
         # instruction_mix fractions
         "alu",
@@ -373,25 +376,19 @@ def _predefined_cols() -> dict[str, list[str]]:
         "pat32_top_mass",
         "pat32_entropy",
     ]
+    # Compact syscall features (avoid redundant counts and categorical 'top_nr').
     syscall = [
         "per_1k",  # from portrait (syscall per 1k insns)
-        "syscall_events",
-        "syscall_distinct",
-        "syscall_total_count",
-        "syscall_top_nr",
-        "syscall_top_count",
-        "syscall_cat_file_count",
-        "syscall_cat_file_ratio",
-        "syscall_cat_net_count",
-        "syscall_cat_net_ratio",
-        "syscall_cat_memory_count",
-        "syscall_cat_memory_ratio",
-        "syscall_cat_process_count",
-        "syscall_cat_process_ratio",
-        "syscall_cat_time_count",
-        "syscall_cat_time_ratio",
-        "syscall_cat_other_count",
-        "syscall_cat_other_ratio",
+        # after dedup_subprefix('syscall', 'syscall_distinct') -> 'distinct'
+        "distinct",
+        "total_count",
+        # after dedup_subprefix('syscall', 'syscall_cat_*_ratio') -> 'cat_*_ratio'
+        "cat_file_ratio",
+        "cat_net_ratio",
+        "cat_memory_ratio",
+        "cat_process_ratio",
+        "cat_time_ratio",
+        "cat_other_ratio",
     ]
     dep = [
         "raw_dist_count",
@@ -407,6 +404,7 @@ def _predefined_cols() -> dict[str, list[str]]:
         "war_dist_bucket_1-4",
         "war_dist_bucket_5-16",
         "war_dist_bucket_17-64",
+        "war_dist_bucket_65+",
         "waw_dist_count",
         "waw_dist_mean",
         "waw_dist_median",
@@ -424,9 +422,29 @@ def _predefined_cols() -> dict[str, list[str]]:
         "vec_waw_dist_count",
         "vec_waw_dist_mean",
         "vec_waw_dist_median",
+        "vec_raw_dist_bucket_1-4",
+        "vec_raw_dist_bucket_5-16",
+        "vec_raw_dist_bucket_17-64",
+        "vec_raw_dist_bucket_65+",
+        "vec_waw_dist_bucket_1-4",
+        "vec_waw_dist_bucket_5-16",
+        "vec_waw_dist_bucket_17-64",
+        "vec_waw_dist_bucket_65+",
+        "vec_war_dist_bucket_1-4",
+        "vec_war_dist_bucket_5-16",
+        "vec_war_dist_bucket_17-64",
+        "vec_war_dist_bucket_65+",
     ]
     ipc = ["total"]
-    return {"mix": mix, "data": loc, "inst": loc, "branch": branch, "syscall": syscall, "dep": dep, "ipc": ipc}
+    return {
+        "mix": mix,
+        "data": loc_data,
+        "inst": loc_inst,
+        "branch": branch,
+        "syscall": syscall,
+        "dep": dep,
+        "ipc": ipc,
+    }
 
 
 def main() -> int:
@@ -442,6 +460,12 @@ def main() -> int:
     ap.add_argument("--access", type=str, default="all", help="per_access key to export (default: all)")
     ap.add_argument("--xlsx-out", type=Path, default=None)
     ap.add_argument("--csv-out", type=Path, default=None)
+    ap.add_argument(
+        "--strict-columns",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Only export predefined feature columns (default: true) for identical schemas across datasets.",
+    )
     args = ap.parse_args()
 
     cases = iter_cases(args.output_base)
@@ -451,6 +475,10 @@ def main() -> int:
 
     rows: list[dict[str, Any]] = []
     predefined = _predefined_cols()
+    allowed_feature_cols: set[str] = set()
+    for cat, names in predefined.items():
+        for n in names:
+            allowed_feature_cols.add(_fmt_cat_key(cat, n))
     feature_cols_by_cat: dict[str, set[str]] = {
         "mix": set(),
         "data": set(),
@@ -490,11 +518,15 @@ def main() -> int:
         }
         # data locality features
         data_prefixed = {_fmt_cat_key("data", k): v for k, v in data_feat.items()}
+        if args.strict_columns:
+            data_prefixed = {k: v for k, v in data_prefixed.items() if k in allowed_feature_cols}
         _merge_features(row, data_prefixed)
         feature_cols_by_cat["data"].update(data_prefixed.keys())
 
         # inst locality features
         inst_prefixed = {_fmt_cat_key("inst", k): v for k, v in inst_feat.items()}
+        if args.strict_columns:
+            inst_prefixed = {k: v for k, v in inst_prefixed.items() if k in allowed_feature_cols}
         _merge_features(row, inst_prefixed)
         feature_cols_by_cat["inst"].update(inst_prefixed.keys())
 
@@ -504,12 +536,14 @@ def main() -> int:
             cat = _classify_portrait_key(core)
             if cat == "other":
                 cat = "mix"
-            if core == "lines_with_ipc_annotation":
-                # Not useful as a final model feature; also avoids confusion with IPC group.
+            if core in ("lines_with_ipc_annotation", "skipped_lines", "parsed_instructions"):
+                # Not useful as final model features; 'skipped_lines'/'parsed_instructions' are parsing/coverage artifacts.
                 continue
             if cat == "ipc" and core not in ipc_keep:
                 continue
             kk = _fmt_cat_key(cat, _dedup_subprefix(cat, core))
+            if args.strict_columns and kk not in allowed_feature_cols:
+                continue
             _merge_features(row, {kk: v})
             if cat in feature_cols_by_cat:
                 feature_cols_by_cat[cat].add(kk)
@@ -520,7 +554,18 @@ def main() -> int:
             cat = _classify_recover_key(core)
             if cat == "other":
                 cat = "syscall"
+            # Keep only compact syscall feature set.
+            if cat == "syscall":
+                # core is like: syscall_total_count, syscall_cat_file_ratio, ...
+                keep = (
+                    core in ("syscall_distinct", "syscall_total_count")
+                    or (core.startswith("syscall_cat_") and core.endswith("_ratio"))
+                )
+                if not keep:
+                    continue
             kk = _fmt_cat_key(cat, _dedup_subprefix(cat, core))
+            if args.strict_columns and kk not in allowed_feature_cols:
+                continue
             _merge_features(row, {kk: v})
             if cat in feature_cols_by_cat:
                 feature_cols_by_cat[cat].add(kk)
@@ -550,12 +595,30 @@ def main() -> int:
         pre = [_fmt_cat_key(cat, n) for n in predefined.get(cat, [])]
         pre_set = set(pre)
         extra = sorted(c for c in cols if c not in pre_set)
+        if args.strict_columns:
+            return [c for c in pre if c in cols]
         return [c for c in pre if c in cols] + extra
 
     # Column order requested by user:
     # instruction mix, data locality, inst locality, branch, syscall, reg dependency, IPC (target) last.
     for cat in ("mix", "data", "inst", "branch", "syscall", "dep", "ipc"):
         headers.extend(_sorted_cols(cat))
+
+    # Ensure no missing feature cells: fill absent feature keys with 0.0.
+    meta_cols = {
+        "bench",
+        "warmup_tag",
+        "warmup_seconds",
+        "access",
+        "data_analysis_json",
+        "inst_analysis_json",
+        "portrait_json",
+    }
+    feature_headers = [h for h in headers if h not in meta_cols]
+    for row in rows:
+        for h in feature_headers:
+            if h not in row:
+                row[h] = 0.0
 
     csv_out = args.csv_out or (args.output_base / "perf_full_features.csv")
     xlsx_out = args.xlsx_out or (args.output_base / "perf_full_features.xlsx")

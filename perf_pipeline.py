@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 import argparse
+import signal
 
 
 def run_step(
@@ -93,7 +94,7 @@ def add_perf_postprocess_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--perf-max-insn-lines",
         type=int,
-        default=500_000,
+        default=5_000_000,
         help="Max insn lines to keep from perf script (0 = unlimited)",
     )
     parser.add_argument(
@@ -181,6 +182,54 @@ def perf_postprocess_one(
     perf_portrait_stderr = report_dir / f"{prefix}.perf.portrait.script.stderr.txt"
     perf_portrait_tmp = intermediate_dir / f"{prefix}.perf.insn.portrait.tmp.txt"
 
+    def run_perf_script_streaming(
+        cmd: list[str],
+        *,
+        out_path: Path,
+        stderr_path: Path,
+        max_keep_lines: int,
+        keep_predicate: Any | None = None,
+    ) -> int:
+        """
+        Run `perf script` and stream stdout to `out_path`.
+
+        If `keep_predicate` is provided, only lines where predicate(line) is True are written.
+        Stops early when written lines reach `max_keep_lines` (if >0) by terminating the subprocess.
+        Returns number of lines written.
+        """
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        written = 0
+        with out_path.open("w", encoding="utf-8") as fout, stderr_path.open("w", encoding="utf-8") as ferr:
+            if verbose:
+                print("[cmd]", " ".join(shlex.quote(x) for x in cmd))
+            p = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=ferr)
+            try:
+                assert p.stdout is not None
+                for line in p.stdout:
+                    if keep_predicate is not None and not keep_predicate(line):
+                        continue
+                    fout.write(line)
+                    written += 1
+                    if max_keep_lines > 0 and written >= max_keep_lines:
+                        # Enough for downstream analysis; stop perf script early.
+                        p.send_signal(signal.SIGINT)
+                        break
+            finally:
+                # Ensure process terminates.
+                try:
+                    p.wait(timeout=2.0)
+                except Exception:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+                    try:
+                        p.wait(timeout=2.0)
+                    except Exception:
+                        pass
+        return written
+
     def truncate_text(src: Path, dst: Path, max_lines: int) -> int:
         if max_lines <= 0:
             # Keep whole file
@@ -196,55 +245,84 @@ def perf_postprocess_one(
                     break
         return n
 
-    run_step(
-        [
-            str(perf_tool),
-            "script",
-            "--insn-trace",
-            "-F",
-            "tid,time,ip,insn",
-            "-i",
-            str(perf_data),
-        ],
-        verbose=verbose,
-        stdout_path=perf_script,
-        stderr_path=perf_script_stderr,
-    )
-    aux_lost, trace_errors = parse_perf_script_health(perf_script_stderr)
-    insn_lines = extract_perf_insn_trace(perf_script, perf_insn, perf_max_insn_lines)
-    try:
-        perf_script.unlink()
-    except FileNotFoundError:
-        pass
-    if insn_lines < 1:
-        raise RuntimeError(f"no perf insn lines extracted (aux_lost={aux_lost}, trace_errors={trace_errors})")
-
-    if insn_portrait:
+    if perf_max_insn_lines > 0:
+        # Stream-filter on the fly to avoid huge perf.script.txt.
+        insn_lines = run_perf_script_streaming(
+            [
+                str(perf_tool),
+                "script",
+                "--insn-trace",
+                "-F",
+                "tid,time,ip,insn",
+                "-i",
+                str(perf_data),
+            ],
+            out_path=perf_insn,
+            stderr_path=perf_script_stderr,
+            max_keep_lines=perf_max_insn_lines,
+            keep_predicate=lambda s: " insn:" in s,
+        )
+        aux_lost, trace_errors = parse_perf_script_health(perf_script_stderr)
+    else:
         run_step(
             [
                 str(perf_tool),
                 "script",
                 "--insn-trace",
-                "--xed",
                 "-F",
-                "tid,ip,insn,ipc",
+                "tid,time,ip,insn",
                 "-i",
                 str(perf_data),
             ],
             verbose=verbose,
-            stdout_path=perf_portrait_tmp,
-            stderr_path=perf_portrait_stderr,
+            stdout_path=perf_script,
+            stderr_path=perf_script_stderr,
         )
-        # Apply the same truncation policy as perf_max_insn_lines to portrait stream.
-        if perf_portrait_tmp.exists() and perf_portrait_tmp.stat().st_size > 0:
-            if perf_max_insn_lines > 0:
-                truncate_text(perf_portrait_tmp, perf_portrait_txt, perf_max_insn_lines)
-                try:
-                    perf_portrait_tmp.unlink()
-                except FileNotFoundError:
-                    pass
-            else:
-                # Unlimited: rename tmp -> final
+        aux_lost, trace_errors = parse_perf_script_health(perf_script_stderr)
+        insn_lines = extract_perf_insn_trace(perf_script, perf_insn, perf_max_insn_lines)
+        try:
+            perf_script.unlink()
+        except FileNotFoundError:
+            pass
+    if insn_lines < 1:
+        raise RuntimeError(f"no perf insn lines extracted (aux_lost={aux_lost}, trace_errors={trace_errors})")
+
+    if insn_portrait:
+        if perf_max_insn_lines > 0:
+            # Stream-truncate portrait decode too.
+            run_perf_script_streaming(
+                [
+                    str(perf_tool),
+                    "script",
+                    "--insn-trace",
+                    "--xed",
+                    "-F",
+                    "tid,ip,insn,ipc",
+                    "-i",
+                    str(perf_data),
+                ],
+                out_path=perf_portrait_txt,
+                stderr_path=perf_portrait_stderr,
+                max_keep_lines=perf_max_insn_lines,
+                keep_predicate=None,
+            )
+        else:
+            run_step(
+                [
+                    str(perf_tool),
+                    "script",
+                    "--insn-trace",
+                    "--xed",
+                    "-F",
+                    "tid,ip,insn,ipc",
+                    "-i",
+                    str(perf_data),
+                ],
+                verbose=verbose,
+                stdout_path=perf_portrait_tmp,
+                stderr_path=perf_portrait_stderr,
+            )
+            if perf_portrait_tmp.exists() and perf_portrait_tmp.stat().st_size > 0:
                 try:
                     perf_portrait_tmp.replace(perf_portrait_txt)
                 except OSError:
