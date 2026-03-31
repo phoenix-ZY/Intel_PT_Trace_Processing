@@ -1,24 +1,32 @@
 # Intel_PT_Trace_Processing
 
-Current workflow for comparing SPEC traces between:
-- SDE real data accesses
-- perf intel_pt recovered data accesses
-- SDE instruction fetch stream
-- perf instruction fetch stream
+This repo collects and post-processes **Intel PT** traces (via `perf`), recovers **memory accesses**
+from decoded instruction traces (via Unicorn), and produces **locality feature JSON reports**
+that can be compared across sources (SDE vs perf) or consumed by downstream models.
 
-The project now uses one unified analysis schema, produced mainly by C tools:
-1. C path emits per-trace analysis JSON (SDE and perf paths).
-2. `compare_mem_trace_metrics.py` compares two analysis JSON files.
+There are three practical entry points today:
+- **SPEC: SDE vs perf similarity** (`run_spec5_sde_perf_similarity.py`)
+- **SPEC: perf-only feature extraction** (`run_spec5_perf_trace_analysis.py`)
+- **Cloud apps (Docker): perf-only collection + feature extraction** (`run_cloud_perf_trace_analysis.py`)
+
+Downstream (optional):
+- **MIIC-inspired interval model backend** (`run_miic_interval_backend.py`) consumes the perf-only outputs.
 
 ## Main scripts
 
-- `run_spec5_sde_perf_similarity.py`  
-  Batch runner for SPEC 5xx workloads and warmup sweeps. It orchestrates:
-  - SDE attach and debugtrace collection
-  - perf intel_pt collection
-  - trace conversion/recovery
-  - data + instruction locality comparison
-  - `summary.json` / `summary.csv` output
+- `run_spec5_sde_perf_similarity.py`
+  - SPEC 5xx 批量跑 warmup sweep
+  - 采集/生成两条参考链路：SDE debugtrace（真实 mem 访问）与 perf Intel PT（recover 后 mem 访问）
+  - 产出：每个 case 的 SDE/perf 分析 JSON + 相似度 compare JSON + 批量 `summary.json`/`summary.csv`
+
+- `run_spec5_perf_trace_analysis.py`
+  - SPEC 5xx **仅 perf**（不跑 SDE、不做相似度对比）
+  - 产出：每个 case 的 perf recovered mem JSONL + `*.perf.*.analysis.json` + 批量 `summary.json`/`summary.csv`
+
+- `run_cloud_perf_trace_analysis.py`
+  - 在 Docker 中启动典型 cloud 服务与压测客户端（redis/nginx/haproxy/postgres/mysql/memcached 等）
+  - 对单 worker 线程采集 perf Intel PT，随后复用同一条 perf-only 后处理管线
+  - 产出：每个 `<service>.<config>/` 下的 `intermediate/`、`mem/`、`report/`
 
 - `analyze_sde_trace_uc.c` + `build_recover_mem_addrs_uc.sh`  
   One-pass SDE analyzer for debugtrace input. In a single scan, it can emit:
@@ -31,6 +39,10 @@ The project now uses one unified analysis schema, produced mainly by C tools:
   Unicorn-based C recovery tool that reconstructs memory accesses from
   instruction trace (`<tid> <time>: <ip> insn: <bytes...>`). It now also
   supports one-pass analysis output (instruction + recovered-data profiles).
+
+- `perf_pipeline.py`
+  - 复用的 perf-only 后处理核心：`perf.data → perf script → insn trace → recover_mem_addrs_uc → analysis JSON`
+  - 被 `run_spec5_*` 与 `run_cloud_perf_trace_analysis.py` 共用
 
 - `compare_mem_trace_metrics.py`  
   Compares two analysis JSON files:
@@ -55,7 +67,7 @@ cd Intel_PT_Trace_Processing
 bash build_recover_mem_addrs_uc.sh
 ```
 
-### 2) Run SPEC batch comparison
+### 2) Run SPEC batch (SDE vs perf) comparison
 
 ```bash
 python3 run_spec5_sde_perf_similarity.py \
@@ -63,13 +75,55 @@ python3 run_spec5_sde_perf_similarity.py \
   --output-base outputs/spec5_sde_perf_subset
 ```
 
-### 3) Inspect outputs
+### 3) Run SPEC batch (perf-only)
+
+```bash
+python3 run_spec5_perf_trace_analysis.py \
+  --warmup-sweep 10,60 \
+  --output-base outputs/spec5_perf_trace_only
+```
+
+### 4) Run cloud apps (perf-only)
+
+> 该脚本会操作 Docker 与 perf，通常需要 root 权限（取决于机器配置与 `perf_event_paranoid`）。
+
+```bash
+sudo python3 run_cloud_perf_trace_analysis.py \
+  --output-dir outputs/cloud_trace \
+  --service redis \
+  --samples-per-config 2
+```
+
+### 5) Inspect outputs
 
 - Per-case directory:  
   `outputs/spec5_sde_perf_subset/<bench>/<warmup_tag>/`
 - Final batch summary:
   - `outputs/spec5_sde_perf_subset/summary.json`
   - `outputs/spec5_sde_perf_subset/summary.csv`
+
+Cloud layout:
+- Per-config directory:
+  `outputs/cloud_trace/<service>.<config>/`
+- Under each config:
+  - `intermediate/`: `*.perf.insn.trace.txt`, `*.perf.script.txt`（可能会被清理/截断）
+  - `mem/`: `*.perf.mem.recovered.jsonl`
+  - `report/`: `*.perf.*.analysis.json`、stderr/logs、可选 portrait 产物
+
+## MIIC interval model backend (optional)
+
+`run_miic_interval_backend.py` consumes existing analysis JSONs produced by the perf-only pipeline:
+- `*.perf.recovered.data.analysis.json`
+- `*.perf.inst.analysis.json` (if present)
+- `*.insn.portrait.json` (if present; enabled by default in perf pipeline)
+
+Example:
+
+```bash
+python3 run_miic_interval_backend.py \
+  --output-base outputs/cloud_trace \
+  --out-csv outputs/cloud_trace/miic_interval_predictions.csv
+```
 
 ## Standalone analysis usage
 
