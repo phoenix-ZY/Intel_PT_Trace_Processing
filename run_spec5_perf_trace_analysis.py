@@ -36,7 +36,7 @@ def main() -> int:
     ap.add_argument("--total-insns", type=int, default=5_000_000)
     ap.add_argument("--line-size", type=int, default=64)
     # Too-short sampling windows often produce only mmap/comm events and no decoded insn trace.
-    ap.add_argument("--perf-record-seconds", type=float, default=0.1)
+    ap.add_argument("--perf-record-seconds", type=float, default=0.01)
     # NOTE: Intel PT uses an AUX ring buffer that is mlock()'d; many systems have a low
     # kernel.perf_event_mlock_kb / RLIMIT_MEMLOCK, so a large default (e.g. 1024 pages)
     # frequently fails with "Permission error mapping pages". Keep this conservative by default.
