@@ -15,18 +15,20 @@ Downstream (optional):
 ## Main scripts
 
 - `run_spec5_sde_perf_similarity.py`
-  - SPEC 5xx 批量跑 warmup sweep
-  - 采集/生成两条参考链路：SDE debugtrace（真实 mem 访问）与 perf Intel PT（recover 后 mem 访问）
-  - 产出：每个 case 的 SDE/perf 分析 JSON + 相似度 compare JSON + 批量 `summary.json`/`summary.csv`
+  - Batch runner for SPEC CPU 5xx with warmup sweeps
+  - Produces two reference paths per case:
+    - SDE debugtrace (real memory accesses)
+    - perf Intel PT (recovered memory accesses from decoded instruction trace)
+  - Outputs: per-case SDE/perf analysis JSON + similarity compare JSON + batch `summary.json`/`summary.csv`
 
 - `run_spec5_perf_trace_analysis.py`
-  - SPEC 5xx **仅 perf**（不跑 SDE、不做相似度对比）
-  - 产出：每个 case 的 perf recovered mem JSONL + `*.perf.*.analysis.json` + 批量 `summary.json`/`summary.csv`
+  - SPEC CPU 5xx **perf-only** (no SDE, no similarity compare)
+  - Outputs: per-case recovered mem JSONL + `*.perf.*.analysis.json` + batch `summary.json`/`summary.csv`
 
 - `run_cloud_perf_trace_analysis.py`
-  - 在 Docker 中启动典型 cloud 服务与压测客户端（redis/nginx/haproxy/postgres/mysql/memcached 等）
-  - 对单 worker 线程采集 perf Intel PT，随后复用同一条 perf-only 后处理管线
-  - 产出：每个 `<service>.<config>/` 下的 `intermediate/`、`mem/`、`report/`
+  - Runs classic cloud services and benchmark clients in Docker (redis/nginx/haproxy/postgres/mysql/memcached, etc.)
+  - Captures perf Intel PT from a single worker thread, then reuses the same perf-only post-processing pipeline
+  - Outputs: `intermediate/`, `mem/`, `report/` under each `<service>.<config>/`
 
 - `analyze_sde_trace_uc.c` + `build_recover_mem_addrs_uc.sh`  
   One-pass SDE analyzer for debugtrace input. In a single scan, it can emit:
@@ -41,8 +43,8 @@ Downstream (optional):
   supports one-pass analysis output (instruction + recovered-data profiles).
 
 - `perf_pipeline.py`
-  - 复用的 perf-only 后处理核心：`perf.data → perf script → insn trace → recover_mem_addrs_uc → analysis JSON`
-  - 被 `run_spec5_*` 与 `run_cloud_perf_trace_analysis.py` 共用
+  - Reusable perf-only post-processing core: `perf.data → perf script → insn trace → recover_mem_addrs_uc → analysis JSON`
+  - Shared by `run_spec5_*` and `run_cloud_perf_trace_analysis.py`
 
 - `compare_mem_trace_metrics.py`  
   Compares two analysis JSON files:
@@ -85,7 +87,7 @@ python3 run_spec5_perf_trace_analysis.py \
 
 ### 4) Run cloud apps (perf-only)
 
-> 该脚本会操作 Docker 与 perf，通常需要 root 权限（取决于机器配置与 `perf_event_paranoid`）。
+> This script drives Docker and perf and often requires root privileges (depending on your host and `perf_event_paranoid`).
 
 ```bash
 sudo python3 run_cloud_perf_trace_analysis.py \
@@ -106,9 +108,9 @@ Cloud layout:
 - Per-config directory:
   `outputs/cloud_trace/<service>.<config>/`
 - Under each config:
-  - `intermediate/`: `*.perf.insn.trace.txt`, `*.perf.script.txt`（可能会被清理/截断）
+  - `intermediate/`: `*.perf.insn.trace.txt`, `*.perf.script.txt` (may be truncated/cleaned up)
   - `mem/`: `*.perf.mem.recovered.jsonl`
-  - `report/`: `*.perf.*.analysis.json`、stderr/logs、可选 portrait 产物
+  - `report/`: `*.perf.*.analysis.json`, stderr/logs, optional portrait artifacts
 
 ## MIIC interval model backend (optional)
 
