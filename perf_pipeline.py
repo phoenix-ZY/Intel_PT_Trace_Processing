@@ -270,6 +270,7 @@ def perf_postprocess_one(
                 [
                     str(perf_tool),
                     "script",
+                    "-f",
                     "--insn-trace",
                     "-F",
                     "tid,time,ip,insn",
@@ -287,6 +288,7 @@ def perf_postprocess_one(
                 [
                     str(perf_tool),
                     "script",
+                    "-f",
                     "--insn-trace",
                     "-F",
                     "tid,time,ip,insn",
@@ -315,6 +317,7 @@ def perf_postprocess_one(
                     [
                         str(perf_tool),
                         "script",
+                        "-f",
                         "--insn-trace",
                         "--xed",
                         "-F",
@@ -332,6 +335,7 @@ def perf_postprocess_one(
                     [
                         str(perf_tool),
                         "script",
+                        "-f",
                         "--insn-trace",
                         "--xed",
                         "-F",

@@ -145,7 +145,48 @@ def main() -> int:
         default=5,
         help="Max samples per benchmark in stream mode (0 = unlimited until exit).",
     )
+    ap.add_argument(
+        "--collect-mode",
+        type=str,
+        choices=["pt", "stat"],
+        default="pt",
+        help="Collection mode: 'pt' = Intel PT via perf record; 'stat' = PMU counters via perf stat (no PT).",
+    )
+    # Back-compat: --perf-stat implies --collect-mode=stat
+    ap.add_argument(
+        "--perf-stat",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Alias of --collect-mode=stat (kept for compatibility).",
+    )
+    ap.add_argument(
+        "--perf-stat-events",
+        type=str,
+        default="cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults",
+        help="perf stat events (comma-separated). Must include cycles/instructions if you want IPC.",
+    )
+    ap.add_argument(
+        "--perf-stat-topdown",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "In collect-mode=stat, also request Intel topdown events if supported by this CPU/perf: "
+            "slots,topdown-retiring,topdown-bad-spec,topdown-fe-bound,topdown-be-bound."
+        ),
+    )
     args = ap.parse_args()
+    if bool(getattr(args, "perf_stat", False)):
+        args.collect_mode = "stat"
+    if str(getattr(args, "collect_mode", "pt")) == "stat" and bool(getattr(args, "perf_stat_topdown", False)):
+        td = "slots,topdown-retiring,topdown-bad-spec,topdown-fe-bound,topdown-be-bound"
+        args.perf_stat_events = f"{args.perf_stat_events},{td}"
+    # In stat mode, use a longer default sampling window (>= 1s) unless user overrides it.
+    if str(getattr(args, "collect_mode", "pt")) == "stat":
+        try:
+            if abs(float(args.perf_record_seconds) - 0.001) < 1e-12:
+                args.perf_record_seconds = 1.0
+        except Exception:
+            pass
 
     # Fields required by run_trace_phase / run_post_phase when SDE is disabled (unused but must exist).
     args.enable_sde = False

@@ -142,6 +142,116 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def parse_perf_stat_csv(text: str) -> dict[str, float]:
+    """
+    Parse `perf stat -x,` output and return numeric counters when available.
+    We care about: cycles, instructions, and derived ipc.
+
+    perf stat usually writes to stderr; caller provides the captured text.
+    """
+    out: dict[str, float] = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # CSV: value,unit,event,....  (unit can be empty)
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3:
+            continue
+        value_s, _unit, event = parts[0], parts[1], parts[2]
+        if not event:
+            continue
+        # Skip non-numeric values such as "<not counted>" / "<not supported>"
+        v = value_s.replace(",", "")
+        try:
+            val = float(v)
+        except ValueError:
+            continue
+        out[event] = val
+    # Derived IPC when possible
+    if out.get("cycles", 0.0) > 0 and out.get("instructions", 0.0) >= 0:
+        out["ipc"] = out["instructions"] / out["cycles"]
+    return out
+
+
+def parse_perf_stat_unsupported(text: str) -> list[str]:
+    """
+    Best-effort extraction of unsupported/not-counted event names from perf stat output.
+    Works for both -x, CSV and human formats.
+    """
+    bad: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        lower = line.lower()
+        if "<not supported>" in lower or "<not counted>" in lower:
+            # CSV: <not supported>,,event,...
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 3 and parts[2]:
+                bad.append(parts[2])
+                continue
+            # human: <not supported>      event-name
+            toks = line.replace("<not supported>", "").replace("<not counted>", "").strip().split()
+            if toks:
+                bad.append(toks[0])
+    # unique, stable order
+    seen: set[str] = set()
+    out: list[str] = []
+    for e in bad:
+        if e not in seen:
+            seen.add(e)
+            out.append(e)
+    return out
+
+
+def run_perf_stat_sample(
+    *,
+    perf_tool: Path,
+    tid: int,
+    duration_s: float,
+    out_txt: Path,
+    out_json: Path,
+    events: str,
+) -> tuple[int, int]:
+    """
+    Run `perf stat` for a specific TID for duration_s seconds.
+    Returns (returncode, stderr_len). Writes raw text + parsed JSON.
+    """
+    out_txt.parent.mkdir(parents=True, exist_ok=True)
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(perf_tool),
+        "stat",
+        "-x",
+        ",",
+        "-e",
+        events,
+        "-t",
+        str(tid),
+        "--",
+        "sleep",
+        str(duration_s),
+    ]
+    pr = subprocess.run(cmd, capture_output=True, text=True)
+    raw = (pr.stderr or "") + (("\n" + pr.stdout) if pr.stdout else "")
+    out_txt.write_text(raw, encoding="utf-8", errors="replace")
+    metrics = parse_perf_stat_csv(raw)
+    unsupported = parse_perf_stat_unsupported(raw)
+    payload = {
+        "schema": "perf-stat-v1",
+        "tid": int(tid),
+        "duration_s": float(duration_s),
+        "events": events,
+        "returncode": int(pr.returncode),
+        "metrics": metrics,
+        "unsupported_events": unsupported,
+        "raw_path": str(out_txt),
+    }
+    out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return pr.returncode, len(raw)
+
+
 def mysql_ready_from_bench_client(host: str, *, timeout_s: int = 120) -> bool:
     """
     Verify MySQL is reachable from BENCH_CONTAINER network namespace.
@@ -909,6 +1019,9 @@ def collect_traces_for_config(
     bench_process: subprocess.Popen,
     perf_mmap_pages: str,
     intel_pt_event: str,
+    *,
+    collect_mode: str = "pt",  # "pt" | "stat"
+    perf_stat_events: str = "cycles,instructions",
     start_index: int = 0,
 ):
     """
@@ -923,7 +1036,10 @@ def collect_traces_for_config(
         "📊",
         f"Sampling TID {worker_tid} every {interval}s (target {max_samples} samples; starting at {sample_count})...",
     )
-    log("🔬", f"perf record -m {perf_mmap_pages} (data,aux mmap pages)")
+    if collect_mode == "pt":
+        log("🔬", f"mode=pt perf record -m {perf_mmap_pages} (data,aux mmap pages)")
+    else:
+        log("🔬", f"mode=stat perf stat -e {perf_stat_events}")
 
     while sample_count < max_samples:
         # Check if the thread is still alive
@@ -939,20 +1055,89 @@ def collect_traces_for_config(
         sample_count += 1
         elapsed = time.time() - start_time
         pt_path = output_dir / f"perf.{bench_name}.{sample_count}.data"
-        if pt_path.exists():
-            log("⚠️", f"{pt_path.name} already exists; skipping index {sample_count}")
-            continue
+        if collect_mode == "stat":
+            case_root = output_dir / bench_name
+            report_dir = case_root / "report"
+            report_dir.mkdir(parents=True, exist_ok=True)
+            slug = bench_name.replace(".", "_")
+            prefix = f"{slug}_s{sample_count}"
+            stat_txt = report_dir / f"{prefix}.perf.stat.csv"
+            stat_json = report_dir / f"{prefix}.perf.stat.json"
+            if stat_json.is_file() and stat_json.stat().st_size > 0:
+                log("⚠️", f"{stat_json.name} already exists; skipping index {sample_count}")
+                continue
+            rc, _ = run_perf_stat_sample(
+                perf_tool=perf_tool,
+                tid=worker_tid,
+                duration_s=record_duration,
+                out_txt=stat_txt,
+                out_json=stat_json,
+                events=perf_stat_events,
+            )
+            # perf stat exits 255 when any requested event is unsupported/not-counted,
+            # but it still prints partial results. Treat 255 as non-fatal.
+            if rc not in (0, 255):
+                log("❌", f"perf stat failed for {bench_name} sample {sample_count} (rc={rc})")
+                break
+            log("✅", f"Sample {sample_count} @ {elapsed:.0f}s → {stat_json.name}")
+        else:
+            if pt_path.exists():
+                try:
+                    existing_sz = pt_path.stat().st_size
+                except OSError:
+                    existing_sz = 0
+                if existing_sz > 0:
+                    log("⚠️", f"{pt_path.name} already exists ({existing_sz}B); skipping index {sample_count}")
+                    continue
+                # Empty file: treat as a failed prior record and re-collect.
+                try:
+                    pt_path.unlink()
+                except FileNotFoundError:
+                    pass
+                log("♻️", f"{pt_path.name} exists but is 0B — deleting and re-recording")
 
-        run_cmd([
-            str(perf_tool), "record",
-            "-m", perf_mmap_pages,
-            "-e", intel_pt_event,
-            "-t", str(worker_tid),
-            "-o", str(pt_path),
-            "--", "sleep", str(record_duration),
-        ])
+            pr = run_cmd(
+                [
+                    str(perf_tool),
+                    "record",
+                    "-m",
+                    perf_mmap_pages,
+                    "-e",
+                    intel_pt_event,
+                    "-t",
+                    str(worker_tid),
+                    "-o",
+                    str(pt_path),
+                    "--",
+                    "sleep",
+                    str(record_duration),
+                ]
+            )
+            # perf can fail (permissions, perf_event_paranoid, unsupported intel_pt) and still leave a 0B file.
+            # Treat empty output as failure so we don't "succeed" with unusable perf.data.
+            try:
+                out_sz = pt_path.stat().st_size if pt_path.exists() else 0
+            except OSError:
+                out_sz = 0
+            if pr.returncode != 0 or out_sz <= 0:
+                if out_sz <= 0 and pt_path.exists():
+                    try:
+                        pt_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                err = (pr.stderr or "").strip()
+                hint = (
+                    "perf record produced empty output. Common causes: not running as root, "
+                    "kernel.perf_event_paranoid too restrictive, missing CAP_PERFMON/CAP_SYS_ADMIN, "
+                    "or intel_pt not supported/enabled on this machine."
+                )
+                log("❌", f"perf record failed for {bench_name} sample {sample_count} (rc={pr.returncode}, size={out_sz}B)")
+                if err:
+                    log("❌", f"perf stderr: {err.splitlines()[-1]}")
+                log("💡", hint)
+                break
 
-        log("✅", f"Sample {sample_count} @ {elapsed:.0f}s → {pt_path.name}")
+            log("✅", f"Sample {sample_count} @ {elapsed:.0f}s → {pt_path.name} ({out_sz}B)")
 
         # Wait for the next interval
         wait_until = time.time() + interval
@@ -984,6 +1169,19 @@ def run_single_config(
     config_name = config["config_name"]
     container_name = config["container_name"]
     bench_name = f"{service_type}.{config_name}"
+
+    # If previous runs left 0-byte perf.data files, they will poison re-runs (existence-based skipping).
+    # Clean them up before deciding whether to collect more.
+    for idx, p in list(iter_perf_data_files(output_dir, bench_name)):
+        try:
+            if p.is_file() and p.stat().st_size == 0:
+                try:
+                    p.unlink()
+                except FileNotFoundError:
+                    pass
+        except OSError:
+            # If we can't stat it reliably, leave it; perf record will handle/overwrite via deletion path above.
+            pass
 
     existing_samples = iter_perf_data_files(output_dir, bench_name)
     existing_n = len(existing_samples)
@@ -1181,6 +1379,8 @@ def run_single_config(
             bench_process=bench_process,
             perf_mmap_pages=mmap_pages,
             intel_pt_event=pt_event,
+            collect_mode=str(getattr(cli_args, "collect_mode", "pt")) if cli_args is not None else "pt",
+            perf_stat_events=str(getattr(cli_args, "perf_stat_events", "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults")) if cli_args is not None else "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults",
             start_index=existing_n if (has_perf and post_complete and existing_n < max_samples) else 0,
         )
 
@@ -1277,6 +1477,35 @@ def main():
         help="Stream MySQL sysbench oltp_read_write prepare to terminal (default: capture, log last lines + duration)",
     )
     parser.add_argument(
+        "--collect-mode",
+        type=str,
+        choices=["pt", "stat"],
+        default="pt",
+        help="Collection mode: 'pt' = Intel PT via perf record; 'stat' = PMU counters via perf stat (no PT).",
+    )
+    # Back-compat: --perf-stat implies --collect-mode=stat
+    parser.add_argument(
+        "--perf-stat",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Alias of --collect-mode=stat (kept for compatibility).",
+    )
+    parser.add_argument(
+        "--perf-stat-events",
+        type=str,
+        default="cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults",
+        help="perf stat events (comma-separated). Must include cycles/instructions if you want IPC.",
+    )
+    parser.add_argument(
+        "--perf-stat-topdown",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "In collect-mode=stat, also request Intel topdown events if supported by this CPU/perf: "
+            "slots,topdown-retiring,topdown-bad-spec,topdown-fe-bound,topdown-be-bound."
+        ),
+    )
+    parser.add_argument(
         "--export-full-features",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1300,6 +1529,19 @@ def main():
         help="intel_pt noretcomp flag (1 reduces PT bandwidth vs 0; may help if AUX still overflows).",
     )
     args = parser.parse_args()
+    if bool(getattr(args, "perf_stat", False)):
+        args.collect_mode = "stat"
+    if str(getattr(args, "collect_mode", "pt")) == "stat" and bool(getattr(args, "perf_stat_topdown", False)):
+        td = "slots,topdown-retiring,topdown-bad-spec,topdown-fe-bound,topdown-be-bound"
+        args.perf_stat_events = f"{args.perf_stat_events},{td}"
+    # If user chooses PMU stat mode but didn't override record window,
+    # bump the default window to a more stable duration (>= 1s).
+    if str(getattr(args, "collect_mode", "pt")) == "stat":
+        try:
+            if abs(float(args.record_duration) - float(DEFAULT_RECORD_DURATION)) < 1e-12:
+                args.record_duration = 1.0
+        except Exception:
+            pass
 
     try:
         args.perf_mmap_pages = normalize_perf_mmap_pages(args.perf_mmap_pages)

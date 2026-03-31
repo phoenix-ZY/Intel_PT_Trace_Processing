@@ -236,6 +236,127 @@ def pick_spec_perf_record_target(
     return resolved_process_pid, "-p"
 
 
+def parse_perf_stat_csv(text: str) -> dict[str, float]:
+    """
+    Parse `perf stat -x,` output to a {event: value} mapping.
+    Non-numeric values like "<not counted>" are skipped.
+    """
+    out: dict[str, float] = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3:
+            continue
+        value_s, _unit, event = parts[0], parts[1], parts[2]
+        if not event:
+            continue
+        try:
+            out[event] = float(value_s.replace(",", ""))
+        except ValueError:
+            continue
+    if out.get("cycles", 0.0) > 0 and out.get("instructions", 0.0) >= 0:
+        out["ipc"] = out["instructions"] / out["cycles"]
+    return out
+
+
+def parse_perf_stat_unsupported(text: str) -> list[str]:
+    bad: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        lower = line.lower()
+        if "<not supported>" in lower or "<not counted>" in lower:
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 3 and parts[2]:
+                bad.append(parts[2])
+                continue
+            toks = line.replace("<not supported>", "").replace("<not counted>", "").strip().split()
+            if toks:
+                bad.append(toks[0])
+    seen: set[str] = set()
+    out: list[str] = []
+    for e in bad:
+        if e not in seen:
+            seen.add(e)
+            out.append(e)
+    return out
+
+
+def maybe_run_perf_stat_for_window(
+    *,
+    perf_flag: str,
+    perf_id: int,
+    duration_s: float,
+    layout: "CaseLayout",
+    args: argparse.Namespace,
+    bench: str,
+    phase: str,
+) -> subprocess.Popen | None:
+    """
+    Start perf stat in parallel with perf record for the same (pid/tid, duration) window.
+    Writes both raw CSV and parsed JSON after completion (caller must communicate()).
+    """
+    if not bool(getattr(args, "perf_stat", False)):
+        return None
+    events = str(getattr(args, "perf_stat_events", "cycles,instructions"))
+    # perf stat prints to stderr; we capture it for stable files.
+    return subprocess.Popen(
+        [
+            "perf",
+            "stat",
+            "-x",
+            ",",
+            "-e",
+            events,
+            perf_flag,
+            str(perf_id),
+            "--",
+            "sleep",
+            str(duration_s),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def finalize_perf_stat(
+    *,
+    stat_proc: subprocess.Popen | None,
+    layout: "CaseLayout",
+    args: argparse.Namespace,
+    bench: str,
+    phase: str,
+    perf_flag: str,
+    perf_id: int,
+    duration_s: float,
+) -> None:
+    if stat_proc is None:
+        return
+    events = str(getattr(args, "perf_stat_events", "cycles,instructions"))
+    st_out, st_err = stat_proc.communicate()
+    raw = (st_err or "") + (("\n" + st_out) if st_out else "")
+    layout.perf_stat_csv.write_text(raw, encoding="utf-8", errors="replace")
+    payload = {
+        "schema": "perf-stat-v1",
+        "bench": bench,
+        "phase": phase,
+        "warmup_s": float(layout.warmup),
+        "duration_s": float(duration_s),
+        "events": events,
+        "perf_flag": perf_flag,
+        "perf_id": int(perf_id),
+        "returncode": int(stat_proc.returncode),
+        "metrics": parse_perf_stat_csv(raw),
+        "unsupported_events": parse_perf_stat_unsupported(raw),
+        "raw_path": str(layout.perf_stat_csv),
+    }
+    layout.perf_stat_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def log_spec_perf_attach(
     *,
     bench: str,
@@ -651,6 +772,8 @@ class CaseLayout:
     perf_script: Path
     perf_script_stderr: Path
     perf_record_stderr: Path
+    perf_stat_csv: Path
+    perf_stat_json: Path
     perf_insn: Path
     perf_rec_mem: Path
     sde_data_analysis_json: Path
@@ -699,6 +822,8 @@ def make_case_layout(*, bench: str, warmup_seconds: float, output_base: Path) ->
         perf_script=intermediate_dir / f"{prefix}.perf.script.txt",
         perf_script_stderr=report_dir / f"{prefix}.perf.script.stderr.txt",
         perf_record_stderr=report_dir / f"{prefix}.perf.record.stderr.txt",
+        perf_stat_csv=report_dir / f"{prefix}.perf.stat.csv",
+        perf_stat_json=report_dir / f"{prefix}.perf.stat.json",
         perf_insn=intermediate_dir / f"{prefix}.perf.insn.trace.txt",
         perf_rec_mem=mem_dir / f"{prefix}.perf.mem.recovered.jsonl",
         sde_data_analysis_json=report_dir / f"{prefix}.sde.data.analysis.json",
@@ -1053,26 +1178,59 @@ def run_trace_phase(
         cleanup_pid(perf_launcher_pid)
         raise RuntimeError("benchmark exited before perf attach")
 
-    run_step(
-        [
-            "perf",
-            "record",
-            "-q",
-            "-m",
-            str(args.perf_mmap_pages),
-            "-e",
-            args.perf_event,
-            "-o",
-            str(layout.perf_data),
-            perf_flag,
-            str(perf_id),
-            "--",
-            "sleep",
-            str(args.perf_record_seconds),
-        ],
-        verbose=args.verbose,
-        stderr_path=layout.perf_record_stderr,
-    )
+    collect_mode = str(getattr(args, "collect_mode", "pt"))
+    if collect_mode == "stat":
+        # PMU-only mode: do NOT run perf record / intel_pt, only perf stat.
+        events = str(getattr(args, "perf_stat_events", "cycles,instructions"))
+        stat_proc = subprocess.Popen(
+            [
+                "perf",
+                "stat",
+                "-x",
+                ",",
+                "-e",
+                events,
+                perf_flag,
+                str(perf_id),
+                "--",
+                "sleep",
+                str(args.perf_record_seconds),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        finalize_perf_stat(
+            stat_proc=stat_proc,
+            layout=layout,
+            args=args,
+            bench=layout.bench,
+            phase="perf_once",
+            perf_flag=perf_flag,
+            perf_id=perf_id,
+            duration_s=float(args.perf_record_seconds),
+        )
+    else:
+        run_step(
+            [
+                "perf",
+                "record",
+                "-q",
+                "-m",
+                str(args.perf_mmap_pages),
+                "-e",
+                args.perf_event,
+                "-o",
+                str(layout.perf_data),
+                perf_flag,
+                str(perf_id),
+                "--",
+                "sleep",
+                str(args.perf_record_seconds),
+            ],
+            verbose=args.verbose,
+            stderr_path=layout.perf_record_stderr,
+        )
     cleanup_pid(perf_target_pid)
     if perf_target_pid != perf_launcher_pid:
         cleanup_pid(perf_launcher_pid)
@@ -1081,7 +1239,8 @@ def run_trace_phase(
     except subprocess.TimeoutExpired:
         pass
     if not layout.perf_data.exists() or layout.perf_data.stat().st_size == 0:
-        raise RuntimeError("empty perf.data")
+        if collect_mode != "stat":
+            raise RuntimeError("empty perf.data")
     return PreparedCase(seq=seq, layout=layout)
 
 
@@ -1140,6 +1299,7 @@ def run_trace_phase_perf_stream(
         raise RuntimeError("perf stream launcher failed to start")
     target_pid = pick_spec_benchmark_pid(launcher_pid, run_dir, exe_basename, resolve_timeout=8.0)
     attach = getattr(args, "spec_perf_attach", "busiest-tid")
+    collect_mode = str(getattr(args, "collect_mode", "pt"))
     if not pid_alive(target_pid):
         cleanup_pid(launcher_pid)
         raise RuntimeError("benchmark exited before perf stream sampling")
@@ -1184,7 +1344,13 @@ def run_trace_phase_perf_stream(
 
             # Materialize one sample as its own case (warmup_seconds = time since start).
             layout = make_case_layout(bench=bench, warmup_seconds=next_at, output_base=args.output_base)
-            if bool(getattr(args, "skip_existing", True)) and layout.perf_data.is_file() and layout.perf_data.stat().st_size > 0:
+            if collect_mode == "stat":
+                if bool(getattr(args, "skip_existing", True)) and layout.perf_stat_json.is_file() and layout.perf_stat_json.stat().st_size > 0:
+                    prepared.append(PreparedCase(seq=seq_base + sample_idx, layout=layout))
+                    sample_idx += 1
+                    next_at += interval
+                    continue
+            elif bool(getattr(args, "skip_existing", True)) and layout.perf_data.is_file() and layout.perf_data.stat().st_size > 0:
                 # Resume-friendly: if perf.data already exists for this timestamped case dir,
                 # do not record again; just schedule post phase (which will also reuse existing outputs).
                 prepared.append(PreparedCase(seq=seq_base + sample_idx, layout=layout))
@@ -1192,26 +1358,57 @@ def run_trace_phase_perf_stream(
                 next_at += interval
                 continue
             try:
-                run_step(
-                    [
-                        "perf",
-                        "record",
-                        "-q",
-                        "-m",
-                        str(args.perf_mmap_pages),
-                        "-e",
-                        args.perf_event,
-                        "-o",
-                        str(layout.perf_data),
-                        perf_flag,
-                        str(perf_id),
-                        "--",
-                        "sleep",
-                        str(args.perf_record_seconds),
-                    ],
-                    verbose=args.verbose,
-                    stderr_path=layout.perf_record_stderr,
-                )
+                if collect_mode == "stat":
+                    events = str(getattr(args, "perf_stat_events", "cycles,instructions"))
+                    stat_proc = subprocess.Popen(
+                        [
+                            "perf",
+                            "stat",
+                            "-x",
+                            ",",
+                            "-e",
+                            events,
+                            perf_flag,
+                            str(perf_id),
+                            "--",
+                            "sleep",
+                            str(args.perf_record_seconds),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    finalize_perf_stat(
+                        stat_proc=stat_proc,
+                        layout=layout,
+                        args=args,
+                        bench=bench,
+                        phase="perf_stream",
+                        perf_flag=perf_flag,
+                        perf_id=perf_id,
+                        duration_s=float(args.perf_record_seconds),
+                    )
+                else:
+                    run_step(
+                        [
+                            "perf",
+                            "record",
+                            "-q",
+                            "-m",
+                            str(args.perf_mmap_pages),
+                            "-e",
+                            args.perf_event,
+                            "-o",
+                            str(layout.perf_data),
+                            perf_flag,
+                            str(perf_id),
+                            "--",
+                            "sleep",
+                            str(args.perf_record_seconds),
+                        ],
+                        verbose=args.verbose,
+                        stderr_path=layout.perf_record_stderr,
+                    )
             except Exception:
                 # Common race: benchmark exits between the alive check and perf attach.
                 # In that case, keep already collected samples and stop sampling gracefully.
@@ -1228,10 +1425,16 @@ def run_trace_phase_perf_stream(
                 if esrch or not pid_alive(target_pid):
                     break
                 raise
-            if not layout.perf_data.exists() or layout.perf_data.stat().st_size == 0:
-                if not pid_alive(target_pid):
-                    break
-                raise RuntimeError("empty perf.data in perf stream sampling")
+            if collect_mode == "stat":
+                if not layout.perf_stat_json.exists() or layout.perf_stat_json.stat().st_size == 0:
+                    if not pid_alive(target_pid):
+                        break
+                    raise RuntimeError("empty perf.stat.json in perf stream sampling")
+            else:
+                if not layout.perf_data.exists() or layout.perf_data.stat().st_size == 0:
+                    if not pid_alive(target_pid):
+                        break
+                    raise RuntimeError("empty perf.data in perf stream sampling")
             prepared.append(PreparedCase(seq=seq_base + sample_idx, layout=layout))
             sample_idx += 1
             next_at += interval
@@ -1251,6 +1454,41 @@ def run_trace_phase_perf_stream(
 def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.Namespace) -> RunCase:
     layout = prepared.layout
     skip_existing = bool(getattr(args, "skip_existing", True))
+    collect_mode = str(getattr(args, "collect_mode", "pt"))
+
+    # PMU-only mode: post phase is just "load perf stat json".
+    if collect_mode == "stat":
+        metrics: dict = {"mode": "perf_stat_only"}
+        try:
+            if layout.perf_stat_json.is_file() and layout.perf_stat_json.stat().st_size > 0:
+                payload = json.loads(layout.perf_stat_json.read_text(encoding="utf-8", errors="replace"))
+                metrics.update(payload.get("metrics", {}) if isinstance(payload, dict) else {})
+                metrics["perf_stat_json"] = str(layout.perf_stat_json)
+                metrics["perf_stat_csv"] = str(layout.perf_stat_csv)
+                return RunCase(
+                    bench=layout.bench,
+                    warmup=layout.warmup,
+                    status="ok",
+                    out_dir=str(layout.out_dir),
+                    metrics=metrics,
+                )
+            return RunCase(
+                bench=layout.bench,
+                warmup=layout.warmup,
+                status="error",
+                out_dir=str(layout.out_dir),
+                error="missing perf.stat.json (collect-mode=stat)",
+                metrics=metrics,
+            )
+        except Exception as e:
+            return RunCase(
+                bench=layout.bench,
+                warmup=layout.warmup,
+                status="error",
+                out_dir=str(layout.out_dir),
+                error=f"failed to read perf.stat.json: {e}",
+                metrics=metrics,
+            )
 
     def _nonempty(p: Path) -> bool:
         try:
@@ -1499,6 +1737,7 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
     use_stream = bool(getattr(args, "perf_stream_sampling", False)) and not bool(
         getattr(args, "enable_sde", False)
     )
+    collect_mode = str(getattr(args, "collect_mode", "pt"))
     warmups = [] if use_stream else parse_warmups(args.warmup_sweep)
     all_benches = sorted(p.name for p in spec_cpu.iterdir() if p.is_dir() and p.name.startswith("5") and p.name.endswith("_r"))
     if args.benchmarks.strip():
@@ -1580,7 +1819,13 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
                     layout = make_case_layout(bench=bench, warmup_seconds=w, output_base=args.output_base)
                     # If post-process outputs already exist, skip trace collection and just schedule post phase
                     # (which will reuse existing outputs when --skip-existing is on).
-                    if bool(getattr(args, "skip_existing", True)) and layout.perf_data_analysis_json.is_file() and layout.perf_inst_analysis_json.is_file():
+                    if collect_mode == "stat":
+                        if bool(getattr(args, "skip_existing", True)) and layout.perf_stat_json.is_file() and layout.perf_stat_json.stat().st_size > 0:
+                            prepared_cases.append(PreparedCase(seq=seq, layout=layout))
+                            seq += 1
+                            print(f"  skip trace: existing perf stat out={layout.out_dir}")
+                            continue
+                    elif bool(getattr(args, "skip_existing", True)) and layout.perf_data_analysis_json.is_file() and layout.perf_inst_analysis_json.is_file():
                         prepared_cases.append(PreparedCase(seq=seq, layout=layout))
                         seq += 1
                         print(f"  skip trace: existing analysis json out={layout.out_dir}")
@@ -1596,7 +1841,10 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
                     )
                     prepared_cases.append(prepared)
                     seq += 1
-                    print(f"  traced: perf_data=ok out={layout.out_dir}")
+                    if collect_mode == "stat":
+                        print(f"  traced: perf_stat=ok out={layout.out_dir}")
+                    else:
+                        print(f"  traced: perf_data=ok out={layout.out_dir}")
                 except Exception as e:
                     msg = str(e)
                     print(f"  error: {msg}")
