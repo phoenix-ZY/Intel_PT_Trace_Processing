@@ -1258,8 +1258,17 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
         except OSError:
             return False
 
+    want_portrait = bool(getattr(args, "insn_portrait", False))
+
     # Fast path: reuse existing perf post-process artifacts if present.
-    if skip_existing and _nonempty(layout.perf_data_analysis_json) and _nonempty(layout.perf_inst_analysis_json):
+    # IMPORTANT: if portrait is requested but portrait JSON is missing, do NOT return here —
+    # we still need to run perf --xed + portrait analysis (recover can be skipped inside perf_pipeline).
+    if (
+        skip_existing
+        and _nonempty(layout.perf_data_analysis_json)
+        and _nonempty(layout.perf_inst_analysis_json)
+        and (not want_portrait or _nonempty(layout.insn_portrait_json))
+    ):
         metrics: dict = {"mode": "reuse_existing"}
         metrics["perf_inst_analysis_json"] = str(layout.perf_inst_analysis_json)
         metrics["perf_data_analysis_json"] = str(layout.perf_data_analysis_json)
@@ -1280,7 +1289,6 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
             metrics=metrics,
         )
 
-    want_portrait = bool(getattr(args, "insn_portrait", False))
     # If the portrait JSON already exists, do not re-run perf --xed decode; we can reuse metrics.
     if want_portrait and _nonempty(layout.insn_portrait_json):
         want_portrait = False

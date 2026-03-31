@@ -818,16 +818,19 @@ def cloud_run_perf_postprocess(
         perf_inst_analysis = report_dir / f"{prefix}.perf.inst.analysis.json"
         perf_insn_portrait_json = report_dir / f"{prefix}.insn.portrait.json"
 
-        # If analysis artifacts already exist, skip the whole sample postprocess.
-        # (Portrait JSON is optional; it is controlled separately below.)
-        if (
+        want_portrait = bool(getattr(args, "insn_portrait", True))
+        have_portrait_json = perf_insn_portrait_json.is_file() and perf_insn_portrait_json.stat().st_size > 0
+        have_recover_outputs = (
             perf_data_analysis.is_file()
             and perf_data_analysis.stat().st_size > 0
             and perf_inst_analysis.is_file()
             and perf_inst_analysis.stat().st_size > 0
             and perf_rec_mem.is_file()
             and perf_rec_mem.stat().st_size > 0
-        ):
+        )
+
+        # If recover+analysis already exist, skip unless we still need to generate portrait JSON.
+        if have_recover_outputs and (not want_portrait or have_portrait_json):
             log("⏭️", f"Sample {sample_idx}: recovered analysis already exists; skipping perf decode/recover.")
             continue
 
@@ -836,8 +839,7 @@ def cloud_run_perf_postprocess(
             shutil.copy2(perf_data, perf_data_copy)
 
         log("📜", f"Post-process sample {sample_idx}: perf script → extract → recover_mem_addrs_uc …")
-        want_portrait = bool(getattr(args, "insn_portrait", True))
-        if want_portrait and perf_insn_portrait_json.is_file() and perf_insn_portrait_json.stat().st_size > 0:
+        if want_portrait and have_portrait_json:
             want_portrait = False
         aux_lost, trace_err, ninsn, _, perf_rec_mem, perf_data_analysis, perf_inst_analysis, portrait_txt = perf_postprocess_one(
             script_dir=script_dir,
