@@ -1280,6 +1280,11 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
             metrics=metrics,
         )
 
+    want_portrait = bool(getattr(args, "insn_portrait", False))
+    # If the portrait JSON already exists, do not re-run perf --xed decode; we can reuse metrics.
+    if want_portrait and _nonempty(layout.insn_portrait_json):
+        want_portrait = False
+
     if args.enable_sde:
         sde_analyzer = script_dir / "analyze_sde_trace_uc"
         if not sde_analyzer.exists():
@@ -1338,7 +1343,7 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
         recover_progress_every=args.recover_progress_every,
         recover_salvage_invalid_mem=args.recover_salvage_invalid_mem,
         recover_salvage_reads=args.recover_salvage_reads,
-        insn_portrait=getattr(args, "insn_portrait", True),
+        insn_portrait=want_portrait,
         verbose=args.verbose,
     )
 
@@ -1547,6 +1552,48 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
     seq = 0
     trace_idx = 0
     stop_now = False
+
+    def _parse_warmup_tag(tag: str) -> float:
+        t = tag.strip()
+        if not t.endswith("s"):
+            raise ValueError(f"bad warmup tag: {tag!r}")
+        core = t[:-1].replace("p", ".")
+        return float(core)
+
+    def _bench_existing_perf_layouts(bench: str) -> list[CaseLayout]:
+        """
+        Stream mode resume helper: if a bench already has any perf.data(s) under
+        <output-base>/<bench>/<tag>/intermediate/*.perf.data, reuse them instead of re-tracing.
+        """
+        bench_dir = args.output_base / bench
+        if not bench_dir.is_dir():
+            return []
+        layouts: list[CaseLayout] = []
+        seen_tags: set[str] = set()
+        for perf_path in bench_dir.rglob("*.perf.data"):
+            # Expected shape:
+            #   <output-base>/<bench>/<tag>/intermediate/<prefix>.perf.data
+            if not perf_path.is_file():
+                continue
+            try:
+                if perf_path.stat().st_size == 0:
+                    continue
+            except OSError:
+                continue
+            try:
+                tag = perf_path.parent.parent.name
+            except Exception:
+                continue
+            if not tag or tag == "_stream" or tag in seen_tags:
+                continue
+            try:
+                warmup_seconds = _parse_warmup_tag(tag)
+            except Exception:
+                continue
+            layouts.append(make_case_layout(bench=bench, warmup_seconds=warmup_seconds, output_base=args.output_base))
+            seen_tags.add(tag)
+        layouts.sort(key=lambda l: l.warmup)
+        return layouts
     for bench in benches:
         run_dir = bench_run_dirs.get(bench)
         if run_dir is None:
@@ -1555,14 +1602,21 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
             trace_idx += 1
             print(f"[trace {trace_idx}/{total_cases}] bench={bench} mode=stream")
             try:
-                prepared_list = run_trace_phase_perf_stream(
-                    seq_base=seq,
-                    bench=bench,
-                    script_dir=root,
-                    spec_root=args.spec_root,
-                    run_dir=run_dir,
-                    args=args,
+                existing_layouts = (
+                    _bench_existing_perf_layouts(bench) if bool(getattr(args, "skip_existing", True)) else []
                 )
+                if existing_layouts:
+                    prepared_list = [PreparedCase(seq=seq + i, layout=l) for i, l in enumerate(existing_layouts)]
+                    print(f"  skip trace: existing perf.data samples={len(prepared_list)} out={args.output_base / bench}")
+                else:
+                    prepared_list = run_trace_phase_perf_stream(
+                        seq_base=seq,
+                        bench=bench,
+                        script_dir=root,
+                        spec_root=args.spec_root,
+                        run_dir=run_dir,
+                        args=args,
+                    )
                 prepared_cases.extend(prepared_list)
                 seq += len(prepared_list)
                 print(f"  traced: samples={len(prepared_list)} out={args.output_base / bench}")
