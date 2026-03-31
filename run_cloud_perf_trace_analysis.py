@@ -813,11 +813,32 @@ def cloud_run_perf_postprocess(
     for sample_idx, perf_data in data_files:
         prefix = f"{slug}_s{sample_idx}"
         perf_data_copy = intermediate / f"{prefix}.perf.data"
+        perf_rec_mem = mem_dir / f"{prefix}.perf.mem.recovered.jsonl"
+        perf_data_analysis = report_dir / f"{prefix}.perf.recovered.data.analysis.json"
+        perf_inst_analysis = report_dir / f"{prefix}.perf.inst.analysis.json"
+        perf_insn_portrait_json = report_dir / f"{prefix}.insn.portrait.json"
 
-        # Always refresh copy so re-collected perf.data replaces stale files.
-        shutil.copy2(perf_data, perf_data_copy)
+        # If analysis artifacts already exist, skip the whole sample postprocess.
+        # (Portrait JSON is optional; it is controlled separately below.)
+        if (
+            perf_data_analysis.is_file()
+            and perf_data_analysis.stat().st_size > 0
+            and perf_inst_analysis.is_file()
+            and perf_inst_analysis.stat().st_size > 0
+            and perf_rec_mem.is_file()
+            and perf_rec_mem.stat().st_size > 0
+        ):
+            log("⏭️", f"Sample {sample_idx}: recovered analysis already exists; skipping perf decode/recover.")
+            continue
+
+        # "Extract perf.data" step for cloud: copy into intermediate (skip if already present).
+        if not (perf_data_copy.is_file() and perf_data_copy.stat().st_size > 0):
+            shutil.copy2(perf_data, perf_data_copy)
 
         log("📜", f"Post-process sample {sample_idx}: perf script → extract → recover_mem_addrs_uc …")
+        want_portrait = bool(getattr(args, "insn_portrait", True))
+        if want_portrait and perf_insn_portrait_json.is_file() and perf_insn_portrait_json.stat().st_size > 0:
+            want_portrait = False
         aux_lost, trace_err, ninsn, _, perf_rec_mem, perf_data_analysis, perf_inst_analysis, portrait_txt = perf_postprocess_one(
             script_dir=script_dir,
             perf_tool=perf_tool,
@@ -839,16 +860,15 @@ def cloud_run_perf_postprocess(
             recover_progress_every=args.recover_progress_every,
             recover_salvage_invalid_mem=args.recover_salvage_invalid_mem,
             recover_salvage_reads=args.recover_salvage_reads,
-            insn_portrait=getattr(args, "insn_portrait", True),
+            insn_portrait=want_portrait,
             verbose=args.verbose_post,
         )
 
-        if getattr(args, "insn_portrait", True) and portrait_txt is not None and portrait_txt.is_file() and portrait_txt.stat().st_size > 0:
+        if want_portrait and portrait_txt is not None and portrait_txt.is_file() and portrait_txt.stat().st_size > 0:
             max_p = args.perf_max_insn_lines if args.perf_max_insn_lines > 0 else 0
             rep = insn_portrait.analyze_file(portrait_txt, max_insns=max_p)
             rep["input_path"] = str(portrait_txt.resolve())
-            insn_portrait_json = report_dir / f"{prefix}.insn.portrait.json"
-            insn_portrait_json.write_text(json.dumps(rep, indent=2, ensure_ascii=False), encoding="utf-8")
+            perf_insn_portrait_json.write_text(json.dumps(rep, indent=2, ensure_ascii=False), encoding="utf-8")
             # Free space: portrait trace text can be large; JSON is the stable artifact.
             try:
                 portrait_txt.unlink()
@@ -864,7 +884,7 @@ def cloud_run_perf_postprocess(
                     "perf_recovered_mem_jsonl": str(perf_rec_mem),
                     "perf_data_analysis_json": str(perf_data_analysis),
                     "perf_inst_analysis_json": str(perf_inst_analysis),
-                    "insn_portrait_json": str(insn_portrait_json),
+                    "insn_portrait_json": str(perf_insn_portrait_json),
                 },
                 "insn_portrait": rep,
             }

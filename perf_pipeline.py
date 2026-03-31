@@ -170,6 +170,19 @@ def perf_postprocess_one(
     mem_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
 
+    def _nonempty(p: Path) -> bool:
+        try:
+            return p.is_file() and p.stat().st_size > 0
+        except OSError:
+            return False
+
+    def _count_lines(p: Path) -> int:
+        try:
+            with p.open("r", encoding="utf-8", errors="replace") as f:
+                return sum(1 for _ in f)
+        except OSError:
+            return 0
+
     perf_script = intermediate_dir / f"{prefix}.perf.script.txt"
     perf_script_stderr = report_dir / f"{prefix}.perf.script.stderr.txt"
     perf_insn = intermediate_dir / f"{prefix}.perf.insn.trace.txt"
@@ -245,92 +258,100 @@ def perf_postprocess_one(
                     break
         return n
 
-    if perf_max_insn_lines > 0:
-        # Stream-filter on the fly to avoid huge perf.script.txt.
-        insn_lines = run_perf_script_streaming(
-            [
-                str(perf_tool),
-                "script",
-                "--insn-trace",
-                "-F",
-                "tid,time,ip,insn",
-                "-i",
-                str(perf_data),
-            ],
-            out_path=perf_insn,
-            stderr_path=perf_script_stderr,
-            max_keep_lines=perf_max_insn_lines,
-            keep_predicate=lambda s: " insn:" in s,
-        )
-        aux_lost, trace_errors = parse_perf_script_health(perf_script_stderr)
+    aux_lost = 0
+    trace_errors = 0
+    if _nonempty(perf_insn):
+        # Reuse existing extracted insn trace (useful for resume/re-run).
+        insn_lines = _count_lines(perf_insn)
     else:
-        run_step(
-            [
-                str(perf_tool),
-                "script",
-                "--insn-trace",
-                "-F",
-                "tid,time,ip,insn",
-                "-i",
-                str(perf_data),
-            ],
-            verbose=verbose,
-            stdout_path=perf_script,
-            stderr_path=perf_script_stderr,
-        )
-        aux_lost, trace_errors = parse_perf_script_health(perf_script_stderr)
-        insn_lines = extract_perf_insn_trace(perf_script, perf_insn, perf_max_insn_lines)
-        try:
-            perf_script.unlink()
-        except FileNotFoundError:
-            pass
-    if insn_lines < 1:
-        raise RuntimeError(f"no perf insn lines extracted (aux_lost={aux_lost}, trace_errors={trace_errors})")
-
-    if insn_portrait:
         if perf_max_insn_lines > 0:
-            # Stream-truncate portrait decode too.
-            run_perf_script_streaming(
+            # Stream-filter on the fly to avoid huge perf.script.txt.
+            insn_lines = run_perf_script_streaming(
                 [
                     str(perf_tool),
                     "script",
                     "--insn-trace",
-                    "--xed",
                     "-F",
-                    "tid,ip,insn,ipc",
+                    "tid,time,ip,insn",
                     "-i",
                     str(perf_data),
                 ],
-                out_path=perf_portrait_txt,
-                stderr_path=perf_portrait_stderr,
+                out_path=perf_insn,
+                stderr_path=perf_script_stderr,
                 max_keep_lines=perf_max_insn_lines,
-                keep_predicate=None,
+                keep_predicate=lambda s: " insn:" in s,
             )
+            aux_lost, trace_errors = parse_perf_script_health(perf_script_stderr)
         else:
             run_step(
                 [
                     str(perf_tool),
                     "script",
                     "--insn-trace",
-                    "--xed",
                     "-F",
-                    "tid,ip,insn,ipc",
+                    "tid,time,ip,insn",
                     "-i",
                     str(perf_data),
                 ],
                 verbose=verbose,
-                stdout_path=perf_portrait_tmp,
-                stderr_path=perf_portrait_stderr,
+                stdout_path=perf_script,
+                stderr_path=perf_script_stderr,
             )
-            if perf_portrait_tmp.exists() and perf_portrait_tmp.stat().st_size > 0:
-                try:
-                    perf_portrait_tmp.replace(perf_portrait_txt)
-                except OSError:
-                    perf_portrait_txt.write_bytes(perf_portrait_tmp.read_bytes())
+            aux_lost, trace_errors = parse_perf_script_health(perf_script_stderr)
+            insn_lines = extract_perf_insn_trace(perf_script, perf_insn, perf_max_insn_lines)
+            try:
+                perf_script.unlink()
+            except FileNotFoundError:
+                pass
+    if insn_lines < 1:
+        raise RuntimeError(f"no perf insn lines extracted (aux_lost={aux_lost}, trace_errors={trace_errors})")
+
+    if insn_portrait:
+        # If the portrait decode output already exists, keep it (resume-friendly).
+        if not _nonempty(perf_portrait_txt):
+            if perf_max_insn_lines > 0:
+                # Stream-truncate portrait decode too.
+                run_perf_script_streaming(
+                    [
+                        str(perf_tool),
+                        "script",
+                        "--insn-trace",
+                        "--xed",
+                        "-F",
+                        "tid,ip,insn,ipc",
+                        "-i",
+                        str(perf_data),
+                    ],
+                    out_path=perf_portrait_txt,
+                    stderr_path=perf_portrait_stderr,
+                    max_keep_lines=perf_max_insn_lines,
+                    keep_predicate=None,
+                )
+            else:
+                run_step(
+                    [
+                        str(perf_tool),
+                        "script",
+                        "--insn-trace",
+                        "--xed",
+                        "-F",
+                        "tid,ip,insn,ipc",
+                        "-i",
+                        str(perf_data),
+                    ],
+                    verbose=verbose,
+                    stdout_path=perf_portrait_tmp,
+                    stderr_path=perf_portrait_stderr,
+                )
+                if perf_portrait_tmp.exists() and perf_portrait_tmp.stat().st_size > 0:
                     try:
-                        perf_portrait_tmp.unlink()
-                    except FileNotFoundError:
-                        pass
+                        perf_portrait_tmp.replace(perf_portrait_txt)
+                    except OSError:
+                        perf_portrait_txt.write_bytes(perf_portrait_tmp.read_bytes())
+                        try:
+                            perf_portrait_tmp.unlink()
+                        except FileNotFoundError:
+                            pass
 
     recover_cmd = [
         str(recover_bin),
@@ -373,15 +394,17 @@ def perf_postprocess_one(
         recover_cmd.append("--salvage-invalid-mem")
         if recover_salvage_reads:
             recover_cmd.append("--salvage-reads")
-    run_step(recover_cmd, verbose=verbose)
-    if not perf_data_analysis.exists() or not perf_inst_analysis.exists():
-        raise RuntimeError("recover_mem_addrs_uc did not write analysis JSON outputs")
+    # If recover outputs already exist, skip re-running recover_mem_addrs_uc.
+    if not (_nonempty(perf_data_analysis) and _nonempty(perf_inst_analysis) and _nonempty(perf_rec_mem)):
+        run_step(recover_cmd, verbose=verbose)
+        if not perf_data_analysis.exists() or not perf_inst_analysis.exists():
+            raise RuntimeError("recover_mem_addrs_uc did not write analysis JSON outputs")
 
-    # Free space: perf_insn trace can be large and is no longer needed after recover.
-    try:
-        perf_insn.unlink()
-    except FileNotFoundError:
-        pass
+        # Free space: perf_insn trace can be large and is no longer needed after recover.
+        try:
+            perf_insn.unlink()
+        except FileNotFoundError:
+            pass
 
     portrait_out: Path | None = None
     if insn_portrait and perf_portrait_txt.is_file() and perf_portrait_txt.stat().st_size > 0:

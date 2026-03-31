@@ -1184,6 +1184,13 @@ def run_trace_phase_perf_stream(
 
             # Materialize one sample as its own case (warmup_seconds = time since start).
             layout = make_case_layout(bench=bench, warmup_seconds=next_at, output_base=args.output_base)
+            if bool(getattr(args, "skip_existing", True)) and layout.perf_data.is_file() and layout.perf_data.stat().st_size > 0:
+                # Resume-friendly: if perf.data already exists for this timestamped case dir,
+                # do not record again; just schedule post phase (which will also reuse existing outputs).
+                prepared.append(PreparedCase(seq=seq_base + sample_idx, layout=layout))
+                sample_idx += 1
+                next_at += interval
+                continue
             try:
                 run_step(
                     [
