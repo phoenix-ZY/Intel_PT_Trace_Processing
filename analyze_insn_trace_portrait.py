@@ -41,6 +41,12 @@ LINE_COMPACT = re.compile(
     re.DOTALL,
 )
 
+# OLD dataset format: tid [cpu] ip category asm... IPC: (n/d)
+LINE_OLD = re.compile(
+    r"^\s*(\d+)\s+\[(\d+)\]\s+([0-9a-fA-F]+)\s+\S+\s+(.+?)\s*$",
+    re.DOTALL,
+)
+
 REG_TOKEN = re.compile(
     r"%([a-zA-Z][a-zA-Z0-9]*)",
 )
@@ -600,12 +606,16 @@ def analyze_lines(
         asm_body = line
         if m_ipc:
             asm_body = m_ipc.group(1).strip()
-            ipc_val = float(m_ipc.group(2))
+            if m_ipc.group(2):
+                ipc_val = float(m_ipc.group(2))
             if m_ipc.group(3) and m_ipc.group(4):
                 ipc_n = int(m_ipc.group(3))
                 ipc_d = int(m_ipc.group(4))
+                if ipc_val is None and ipc_d > 0:
+                    ipc_val = float(ipc_n) / float(ipc_d)
             ipc_lines += 1
-            ipc_values.append(ipc_val)
+            if ipc_val is not None:
+                ipc_values.append(ipc_val)
             if ipc_n is not None and ipc_d is not None and ipc_d > 0:
                 ipc_retire_nums.append(ipc_n)
                 ipc_retire_dens.append(ipc_d)
@@ -625,6 +635,13 @@ def analyze_lines(
                 tid = int(mc.group(1))
                 ip_hex = mc.group(2).lower()
                 asm = mc.group(3).strip()
+            else:
+                # Try OLD dataset format: tid [cpu] ip category asm...
+                mo = LINE_OLD.match(asm_body)
+                if mo:
+                    tid = int(mo.group(1))
+                    ip_hex = mo.group(3).lower()
+                    asm = mo.group(4).strip()
 
         if tid is None or not asm:
             skipped += 1

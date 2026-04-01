@@ -354,9 +354,11 @@ def _predefined_cols() -> dict[str, list[str]]:
         "submix_other",
     ]
     branch = [
-        "branch_conditional_per_1k",
-        "branch_unconditional_per_1k",
+        "conditional_per_1k",
+        "unconditional_per_1k",
+        "indirect_per_1k",
         "call_direct_per_1k",
+        "call_indirect_per_1k",
         "return_per_1k",
         "taken_rate",
         "taken_entropy",
