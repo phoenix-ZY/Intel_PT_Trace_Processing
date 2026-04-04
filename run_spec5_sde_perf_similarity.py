@@ -562,6 +562,7 @@ def warmup_tag(v: float) -> str:
 def parse_run_list_entry(run_list: Path) -> tuple[str, Path]:
     if not run_list.is_file():
         raise FileNotFoundError(f"missing run/list: {run_list}")
+    last: tuple[str, Path] | None = None
     for line in run_list.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line or line == "__END__":
@@ -575,8 +576,10 @@ def parse_run_list_entry(run_list: Path) -> tuple[str, Path]:
                 break
         if run_dir is None:
             continue
-        return run_id, run_dir
-    raise RuntimeError(f"no usable entry in {run_list}")
+        last = (run_id, run_dir)
+    if last is None:
+        raise RuntimeError(f"no usable entry in {run_list}")
+    return last
 
 
 def extract_cmd_line(spec_root: Path, bench_run_dir: Path) -> str:
