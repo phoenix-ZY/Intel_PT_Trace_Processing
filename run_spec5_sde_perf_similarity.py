@@ -1753,12 +1753,16 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
     collect_mode = str(getattr(args, "collect_mode", "pt"))
     warmups = [] if use_stream else parse_warmups(args.warmup_sweep)
     all_benches = sorted(p.name for p in spec_cpu.iterdir() if p.is_dir() and p.name.startswith("5") and p.name.endswith("_r"))
-    if args.benchmarks.strip():
-        benches = [x.strip() for x in args.benchmarks.split(",") if x.strip()]
+    bm = str(getattr(args, "benchmarks", "")).strip()
+    if bm:
+        if bm.lower() == "representative":
+            benches = [b for b in DEFAULT_REPRESENTATIVE_BENCHES if b in all_benches]
+            if not benches:
+                benches = all_benches
+        else:
+            benches = [x.strip() for x in bm.split(",") if x.strip()]
     else:
-        benches = [b for b in DEFAULT_REPRESENTATIVE_BENCHES if b in all_benches]
-        if not benches:
-            benches = all_benches
+        benches = all_benches
     if args.bench_limit > 0:
         benches = benches[: args.bench_limit]
     if not benches:
@@ -2084,7 +2088,8 @@ def main() -> int:
         "--benchmarks",
         type=str,
         default="",
-        help="optional comma list like 505.mcf_r,510.parest_r; empty means representative subset",
+        help="comma list of bench dirs, or the keyword 'representative' for the small default subset; "
+        "empty runs every benchspec/CPU/*5*_r (integer + FP rate builds)",
     )
     ap.add_argument("--bench-limit", type=int, default=0, help="for quick test, limit benchmark count")
     ap.add_argument(

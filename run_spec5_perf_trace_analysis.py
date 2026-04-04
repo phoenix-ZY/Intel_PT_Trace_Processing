@@ -12,6 +12,9 @@ For SDE reference traces and similarity scores against SDE, use:
 Outputs:
   `--output-base/<bench>/<warmup_tag>/` per case, plus `summary.json` / `summary.csv`.
   Warmup pairwise similarity files are only produced when feature bundles exist (SDE path).
+
+Benchmark selection: with default `--benchmarks` empty, all `benchspec/CPU/5*_r` cases are run
+(integer + FP). Use `--benchmarks representative` for the previous small subset, or a comma list.
 """
 
 from __future__ import annotations
@@ -103,8 +106,9 @@ def main() -> int:
         "--benchmarks",
         type=str,
         default="",
-        help="optional comma list; empty means representative subset "
-        + f"({', '.join(DEFAULT_REPRESENTATIVE_BENCHES[:3])}, …)",
+        help="comma list, or 'representative' for subset "
+        + f"({', '.join(DEFAULT_REPRESENTATIVE_BENCHES[:3])}, …); "
+        "empty = all benchspec/CPU/5*_r (int + FP)",
     )
     ap.add_argument("--bench-limit", type=int, default=0, help="for quick test, limit benchmark count")
     ap.add_argument(
