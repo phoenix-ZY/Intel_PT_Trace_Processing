@@ -514,7 +514,9 @@ def main() -> int:
         ]
         inst_json = next((p for p in inst_json_candidates if p.is_file()), inst_json_candidates[0])
         inst_feat = load_locality_feature_from_analysis_json(inst_json, access=args.access) if inst_json.is_file() else {}
-        port_feat = load_portrait_metrics(portrait_json) if portrait_json is not None else {}
+        if portrait_json is None:
+            continue
+        port_feat = load_portrait_metrics(portrait_json)
         recover_report = data_json.parent / data_json.name.replace(
             ".perf.recovered.data.analysis.json", ".perf.recover.report.json"
         )
@@ -529,7 +531,7 @@ def main() -> int:
             "access": args.access,
             "data_analysis_json": str(data_json),
             "inst_analysis_json": str(inst_json) if inst_json.is_file() else "",
-            "portrait_json": str(portrait_json) if portrait_json is not None else "",
+            "portrait_json": str(portrait_json),
         }
         # data locality features
         data_prefixed = {_fmt_cat_key("data", k): v for k, v in data_feat.items()}
@@ -598,7 +600,8 @@ def main() -> int:
     if not rows:
         print(
             "[error] no rows exported: every case was skipped "
-            "(missing *.perf.recover.report.json next to each data analysis JSON) "
+            "(need both *.insn.portrait.json and *.perf.recover.report.json next to each "
+            "*.perf.recovered.data.analysis.json) "
             f"under {args.output_base}",
             file=sys.stderr,
         )
