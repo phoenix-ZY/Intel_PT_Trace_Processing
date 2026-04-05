@@ -84,8 +84,19 @@ def load_portrait_metrics(path: Path) -> dict[str, float]:
 def load_recover_report_metrics(path: Path) -> dict[str, float]:
     """
     Parse recover_mem_addrs_uc --report-out JSON and derive syscall features.
+
+    Call only when ``path.is_file()``; if the file is empty or not valid JSON,
+    returns ``{}`` (row is still exported once the recover file exists).
     """
-    obj = json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_text(encoding="utf-8")
+    if not raw.strip():
+        return {}
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(obj, dict):
+        return {}
     out: dict[str, float] = {}
     if isinstance(obj.get("syscall_events"), (int, float)):
         out["recover_syscall_events"] = float(obj["syscall_events"])
@@ -507,7 +518,9 @@ def main() -> int:
         recover_report = data_json.parent / data_json.name.replace(
             ".perf.recovered.data.analysis.json", ".perf.recover.report.json"
         )
-        rec_feat = load_recover_report_metrics(recover_report) if recover_report.is_file() else {}
+        if not recover_report.is_file():
+            continue
+        rec_feat = load_recover_report_metrics(recover_report)
 
         row: dict[str, Any] = {
             "bench": bench,
@@ -581,6 +594,15 @@ def main() -> int:
                 feature_cols_by_cat[cat].add(col)
 
         rows.append(row)
+
+    if not rows:
+        print(
+            "[error] no rows exported: every case was skipped "
+            "(missing *.perf.recover.report.json next to each data analysis JSON) "
+            f"under {args.output_base}",
+            file=sys.stderr,
+        )
+        return 2
 
     headers = [
         "bench",
