@@ -89,10 +89,10 @@ def flatten_portrait(portrait: dict[str, Any]) -> dict[str, Any]:
     if not portrait:
         return {}
     try:
-        from intel_pt_trace_processing.core import portrait as insn_portrait
+        from intel_pt_trace_processing.core.portrait_metrics import flatten_portrait_metrics
     except Exception:
         return {}
-    flat = insn_portrait.flatten_portrait_metrics(portrait)
+    flat = flatten_portrait_metrics(portrait)
     return {k: v for k, v in flat.items() if isinstance(v, (int, float, str))}
 
 
@@ -103,8 +103,8 @@ def flatten_trace_profile(profile: dict[str, Any]) -> dict[str, Any]:
     }
     source = profile.get("source")
     if isinstance(source, dict):
-        row["source_kind"] = source.get("kind", "")
-        row["source_path"] = source.get("path", "")
+        row["source_kind"] = source.get("kind", source.get("format", ""))
+        row["source_path"] = source.get("path", source.get("input", ""))
 
     health = profile.get("health")
     if isinstance(health, dict):
@@ -113,22 +113,26 @@ def flatten_trace_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 row[f"health_{key}"] = value
 
     features = profile.get("features")
-    if not isinstance(features, dict):
-        return row
+    if isinstance(features, dict):
+        data_memory = features.get("data_memory")
+        instruction_memory = features.get("instruction_memory")
+        recovery = features.get("recovery")
+        portrait = features.get("instruction_portrait")
+    else:
+        data_memory = profile.get("data_locality")
+        instruction_memory = profile.get("inst_locality")
+        recovery = profile.get("recover", profile.get("recover_report"))
+        portrait = profile.get("portrait", profile.get("insn_portrait"))
 
-    data_memory = features.get("data_memory")
     if isinstance(data_memory, dict):
         row.update(flatten_analysis_features(data_memory, namespace="data"))
 
-    instruction_memory = features.get("instruction_memory")
     if isinstance(instruction_memory, dict):
         row.update(flatten_analysis_features(instruction_memory, namespace="inst"))
 
-    recovery = features.get("recovery")
     if isinstance(recovery, dict):
         row.update(flatten_recovery_report(recovery))
 
-    portrait = features.get("instruction_portrait")
     if isinstance(portrait, dict):
         row.update(flatten_portrait(portrait))
 

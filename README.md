@@ -11,7 +11,7 @@ The repository is organized around four responsibilities:
 - **Run an analytical performance model on extracted features** (`scripts/model/run_miic_interval_backend.py`, `src/intel_pt_trace_processing/model/miic_interval.py`)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current architecture and
-[`docs/REFACTOR_PLAN.md`](docs/REFACTOR_PLAN.md) for the detailed migration plan.
+responsibility boundaries.
 
 Downstream (optional):
 - **MIIC-inspired interval model backend** (`scripts/model/run_miic_interval_backend.py`) consumes the perf-only outputs.
@@ -31,7 +31,7 @@ Downstream (optional):
 
 - `scripts/collect/run_cloud_perf_trace_analysis.py`
   - Runs classic cloud services and benchmark clients in Docker (redis/nginx/haproxy/postgres/mysql/memcached, etc.)
-  - Captures perf Intel PT from a single worker thread, then reuses the same perf-only post-processing pipeline
+  - Captures perf Intel PT from a single worker thread, then reuses the same perf-only stream processor
   - Outputs: `intermediate/`, `mem/`, `report/` under each `<service>.<config>/`
 
 - `csrc/analyze_sde_trace_uc.c` + `build_recover_mem_addrs_uc.sh`
@@ -46,24 +46,24 @@ Downstream (optional):
   instruction trace (`<tid> <time>: <ip> insn: <bytes...>`). It now also
   supports one-pass analysis output (instruction + recovered-data profiles).
 
-- `src/intel_pt_trace_processing/perf/pipeline.py`
-  - Reusable perf-only post-processing core: `perf.data → perf script → insn trace → recover_mem_addrs_uc → analysis JSON`
+- `src/intel_pt_trace_processing/perf/stream.py`
+  - Reusable perf-only post-processing core:
+    `perf.data -> perf script -> trace_feature_processor -> combined JSON`
   - Shared by the collectors under `scripts/collect/`
 
 - `trace_feature_api.py` **(public software-feature API — recommended for downstream)**
   - One importable call that turns a single `perf.data` into a software-feature dict/JSON:
     `extract_software_features(perf_data) -> dict`
   - Delegates to `src/intel_pt_trace_processing/perf/processor.py`
-  - Wraps the full pipeline and hides the low-level parameter/path bookkeeping
+  - Wraps the one-pass stream processor and hides the low-level parameter/path bookkeeping
   - Produces **software features only** (instruction-flow, data/instruction locality, optional
     instruction portrait); attaching hardware/microarchitecture parameters is left to the
     downstream consumer (e.g. ArchLens). See [Software-feature API](#software-feature-api-for-downstream) below.
 
-- `csrc/trace_feature_processor.c` **(experimental one-pass stream processor)**
+- `csrc/trace_feature_processor.c` **(default one-pass stream processor)**
   - Reads `perf script --insn-trace` text from stdin and emits one combined feature JSON
-  - Uses XED directly for instruction portrait statistics
+  - Uses Unicorn for memory recovery and XED directly for instruction portrait statistics
   - Built by `build_recover_mem_addrs_uc.sh` when XED headers/libraries are available
-  - Not yet the default implementation behind `trace_feature_api.py`
 
 - `scripts/tools/compare_mem_trace_metrics.py`
   Compares two analysis JSON files:
@@ -127,16 +127,16 @@ Cloud layout:
 - Per-config directory:
   `outputs/cloud_trace/<service>.<config>/`
 - Under each config:
-  - `intermediate/`: `*.perf.insn.trace.txt`, `*.perf.script.txt` (may be truncated/cleaned up)
+  - `intermediate/`: copied `*.perf.data` and optional temporary/debug files
   - `mem/`: `*.perf.mem.recovered.jsonl`
   - `report/`: `*.perf.*.analysis.json`, stderr/logs, optional portrait artifacts
 
 ## MIIC interval model backend (optional)
 
-`scripts/model/run_miic_interval_backend.py` consumes existing analysis JSONs produced by the perf-only pipeline:
+`scripts/model/run_miic_interval_backend.py` consumes existing analysis JSONs produced by the perf-only stream processor:
 - `*.perf.recovered.data.analysis.json`
 - `*.perf.inst.analysis.json` (if present)
-- `*.insn.portrait.json` (if present; enabled by default in perf pipeline)
+- `*.insn.portrait.json` (if present; enabled by default in perf processing)
 
 Example:
 
@@ -157,22 +157,22 @@ recover/analysis knobs, or the output directory layout.
 
 - Input: a single raw Intel PT capture (`perf.data`).
 - Output: a `trace-profile-v1` software-feature dictionary (or JSON file) containing
-  `data_locality`, `inst_locality`, `recover_report`, optional `insn_portrait`, and pipeline
+  `data_locality`, `inst_locality`, `recover_report`, optional `insn_portrait`, and processor
   `health` counters.
 - It produces **software features only**. It intentionally does **not** attach any
   hardware/microarchitecture parameters — that is the downstream consumer's job (ArchLens
   joins these software features with its own architecture metadata).
 - Trace collection (`perf record`) and SDE-based validation are **out of scope** here.
 
-**Prerequisite**: build the recovery binary first (`bash build_recover_mem_addrs_uc.sh`),
-since the API reuses `recover_mem_addrs_uc`.
+**Prerequisite**: build the C processors first (`bash build_recover_mem_addrs_uc.sh`),
+since the API runs `trace_feature_processor`.
 
 ### As a Python import
 
 ```python
 from trace_feature_api import extract_software_features, FeatureExtractionConfig
 
-# Simplest form: defaults mirror the production pipeline.
+# Simplest form: defaults mirror the production stream processor.
 features = extract_software_features("perf.data")
 print(features["data_locality"])
 print(features["inst_locality"])
@@ -195,8 +195,8 @@ python3 trace_feature_api.py perf.data -o features.json --work-dir outputs/_tmp_
 python3 trace_feature_api.py perf.data -o features.json --theory-model
 ```
 
-The batch runners under `scripts/collect/` continue to call the lower-level
-`intel_pt_trace_processing.perf.pipeline.perf_postprocess_one()` directly.
+The batch runners under `scripts/collect/` call the lower-level
+`intel_pt_trace_processing.perf.stream.process_perf_stream()` directly.
 
 ## Standalone analysis usage
 

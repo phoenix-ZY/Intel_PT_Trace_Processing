@@ -16,7 +16,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from intel_pt_trace_processing.core import portrait as insn_portrait
+from intel_pt_trace_processing.core.portrait_metrics import flatten_portrait_metrics
 from export_trace_features_to_excel import write_csv, write_xlsx
 
 
@@ -79,7 +79,7 @@ def load_locality_feature_from_analysis_json(path: Path, *, access: str = "all")
 
 def load_portrait_metrics(path: Path) -> dict[str, float]:
     obj = json.loads(path.read_text(encoding="utf-8"))
-    flat = insn_portrait.flatten_portrait_metrics(obj)
+    flat = flatten_portrait_metrics(obj)
     out: dict[str, float] = {}
     for k, v in flat.items():
         if isinstance(v, (int, float)):

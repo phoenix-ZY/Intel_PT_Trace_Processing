@@ -49,7 +49,7 @@ def predict_from_trace_profile(profile: dict[str, Any], config: TheoryConfig) ->
         }
 
     try:
-        from intel_pt_trace_processing.core import portrait as insn_portrait
+        from intel_pt_trace_processing.core.portrait_metrics import flatten_portrait_metrics
         from intel_pt_trace_processing.model.miic_interval import CpuSprLikeConfig, MiicInputs, predict_interval_cycles
     except Exception as exc:
         return {
@@ -72,7 +72,7 @@ def predict_from_trace_profile(profile: dict[str, Any], config: TheoryConfig) ->
 
     data_feature = analysis_access_feature(data_analysis, access=config.access)
     inst_feature = analysis_access_feature(inst_analysis, access=config.access)
-    flat_portrait = insn_portrait.flatten_portrait_metrics(portrait_obj) if portrait_obj else {}
+    flat_portrait = flatten_portrait_metrics(portrait_obj) if portrait_obj else {}
 
     def pick_float(*keys: str, default: float = 0.0) -> float:
         for key in keys:

@@ -22,9 +22,13 @@ for _path in (REPO_ROOT, SRC_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from intel_pt_trace_processing.core import portrait as insn_portrait
-from intel_pt_trace_processing.perf.pipeline import perf_postprocess_one, run_step
-from intel_pt_trace_processing.perf.pipeline import add_perf_postprocess_args, validate_perf_postprocess_args
+from intel_pt_trace_processing.core.commands import run_step
+from intel_pt_trace_processing.core.portrait_metrics import flatten_portrait_metrics
+from intel_pt_trace_processing.perf.stream import (
+    add_perf_postprocess_args,
+    process_perf_stream,
+    validate_perf_postprocess_args,
+)
 
 DEFAULT_REPRESENTATIVE_BENCHES = [
     "505.mcf_r",  # memory-latency sensitive / pointer-chasing
@@ -1508,8 +1512,8 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
     want_portrait = bool(getattr(args, "insn_portrait", False))
 
     # Fast path: reuse existing perf post-process artifacts if present.
-    # IMPORTANT: if portrait is requested but portrait JSON is missing, do NOT return here —
-    # we still need to run perf --xed + portrait analysis (recover can be skipped inside the perf pipeline).
+    # IMPORTANT: if portrait is requested but portrait JSON is missing, do NOT return here;
+    # the one-pass stream processor should refresh the full perf feature set.
     if (
         skip_existing
         and _nonempty(layout.perf_data_analysis_json)
@@ -1523,7 +1527,7 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
         if getattr(args, "insn_portrait", False) and _nonempty(layout.insn_portrait_json):
             try:
                 rep = json.loads(layout.insn_portrait_json.read_text(encoding="utf-8"))
-                metrics.update(insn_portrait.flatten_portrait_metrics(rep))
+                metrics.update(flatten_portrait_metrics(rep))
                 metrics["perf_insn_portrait_json"] = str(layout.insn_portrait_json)
                 metrics["trace_profile_merged_json"] = str(layout.trace_profile_merged_json)
             except Exception:
@@ -1535,10 +1539,6 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
             out_dir=str(layout.out_dir),
             metrics=metrics,
         )
-
-    # If the portrait JSON already exists, do not re-run perf --xed decode; we can reuse metrics.
-    if want_portrait and _nonempty(layout.insn_portrait_json):
-        want_portrait = False
 
     if args.enable_sde:
         sde_analyzer = script_dir / "analyze_sde_trace_uc"
@@ -1577,7 +1577,7 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
                 ],
                 verbose=args.verbose,
             )
-    perf_aux_lost, perf_trace_errors, perf_insn_lines, _, _, _, _, portrait_txt = perf_postprocess_one(
+    perf_result = process_perf_stream(
         script_dir=script_dir,
         perf_tool="perf",
         perf_data=layout.perf_data,
@@ -1587,18 +1587,17 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
         report_dir=layout.report_dir,
         perf_max_insn_lines=args.perf_max_insn_lines,
         line_size=args.line_size,
+        analysis_sdp_max_lines=args.analysis_sdp_max_lines,
         analysis_rd_hist_cap_lines=args.analysis_rd_hist_cap_lines,
         analysis_stride_bin_cap_lines=args.analysis_stride_bin_cap_lines,
-        recover_init_regs=args.recover_init_regs,
-        recover_reg_staging=args.recover_reg_staging,
         recover_mvs=args.recover_mvs,
         recover_fill_seed=args.recover_fill_seed,
-        recover_page_init=args.recover_page_init,
-        recover_page_init_seed=args.recover_page_init_seed,
         recover_progress_every=args.recover_progress_every,
         recover_salvage_invalid_mem=args.recover_salvage_invalid_mem,
         recover_salvage_reads=args.recover_salvage_reads,
         insn_portrait=want_portrait,
+        split_crossline=args.split_crossline,
+        rcx_soft_threshold=args.rcx_soft_threshold,
         verbose=args.verbose,
     )
 
@@ -1660,49 +1659,41 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
         metrics["mode"] = "perf_only"
         metrics["perf_inst_analysis_json"] = str(layout.perf_inst_analysis_json)
         metrics["perf_data_analysis_json"] = str(layout.perf_data_analysis_json)
-    metrics["perf_insn_lines"] = perf_insn_lines
-    metrics["perf_aux_lost"] = perf_aux_lost
-    metrics["perf_trace_errors"] = perf_trace_errors
+    metrics["perf_insn_lines"] = perf_result.insn_lines
+    metrics["perf_aux_lost"] = perf_result.aux_lost
+    metrics["perf_trace_errors"] = perf_result.trace_errors
 
-    if getattr(args, "insn_portrait", False) and portrait_txt is not None and portrait_txt.is_file() and portrait_txt.stat().st_size > 0:
-        max_p = args.perf_max_insn_lines if args.perf_max_insn_lines > 0 else 0
-        rep = insn_portrait.analyze_file(portrait_txt, max_insns=max_p)
-        rep["input_path"] = str(layout.perf_portrait_txt.resolve())
-        layout.insn_portrait_json.parent.mkdir(parents=True, exist_ok=True)
-        layout.insn_portrait_json.write_text(json.dumps(rep, indent=2, ensure_ascii=False), encoding="utf-8")
-        metrics.update(insn_portrait.flatten_portrait_metrics(rep))
-        metrics["perf_insn_portrait_json"] = str(layout.insn_portrait_json)
-        # Free space: portrait trace text can be large; JSON is the stable artifact.
-        try:
-            portrait_txt.unlink()
-        except FileNotFoundError:
-            pass
-        merged = {
-            "schema": "trace-profile-v1",
+    if getattr(args, "insn_portrait", False) and _nonempty(perf_result.portrait_json):
+        rep = json.loads(perf_result.portrait_json.read_text(encoding="utf-8"))
+        metrics.update(flatten_portrait_metrics(rep))
+        metrics["perf_insn_portrait_json"] = str(perf_result.portrait_json)
+
+    merged = perf_result.profile
+    merged.update(
+        {
             "bench": layout.bench,
             "warmup_seconds": layout.warmup,
             "paths": {
                 "perf_data": str(layout.perf_data),
-                "perf_recovered_mem_jsonl": str(layout.perf_rec_mem),
-                "perf_data_analysis_json": str(layout.perf_data_analysis_json),
-                "perf_inst_analysis_json": str(layout.perf_inst_analysis_json),
-                "insn_portrait_json": str(layout.insn_portrait_json),
+                "perf_recovered_mem_jsonl": str(perf_result.recovered_mem_jsonl),
+                "perf_data_analysis_json": str(perf_result.data_analysis_json),
+                "perf_inst_analysis_json": str(perf_result.inst_analysis_json),
+                "insn_portrait_json": str(perf_result.portrait_json),
+                "stream_profile_json": str(perf_result.combined_json),
             },
-            "insn_portrait": rep,
         }
-        if args.enable_sde:
-            merged["paths"].update(
-                {
-                    "sde_data_analysis_json": str(layout.sde_data_analysis_json),
-                    "sde_inst_analysis_json": str(layout.sde_inst_analysis_json),
-                    "data_compare_json": str(layout.data_sim_json),
-                    "inst_compare_json": str(layout.inst_sim_json),
-                }
-            )
-        layout.trace_profile_merged_json.write_text(
-            json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    if args.enable_sde:
+        merged["paths"].update(
+            {
+                "sde_data_analysis_json": str(layout.sde_data_analysis_json),
+                "sde_inst_analysis_json": str(layout.sde_inst_analysis_json),
+                "data_compare_json": str(layout.data_sim_json),
+                "inst_compare_json": str(layout.inst_sim_json),
+            }
         )
-        metrics["trace_profile_merged_json"] = str(layout.trace_profile_merged_json)
+    layout.trace_profile_merged_json.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+    metrics["trace_profile_merged_json"] = str(layout.trace_profile_merged_json)
 
     return RunCase(bench=layout.bench, warmup=layout.warmup, status="ok", out_dir=str(layout.out_dir), metrics=metrics)
 
@@ -1714,8 +1705,6 @@ def _validate_spec_batch_common_args(args: argparse.Namespace) -> None:
         raise SystemExit("--perf-record-seconds must be > 0")
     if args.perf_mmap_pages <= 0:
         raise SystemExit("--perf-mmap-pages must be > 0")
-    if args.recover_page_init_seed < 0:
-        raise SystemExit("--recover-page-init-seed must be >= 0")
     if args.recover_progress_every < 0:
         raise SystemExit("--recover-progress-every must be >= 0")
     if args.post_workers <= 0:
@@ -2062,7 +2051,7 @@ def main() -> int:
     )
     ap.add_argument("--warmup-sweep", type=str, default="60,120", help="comma list, e.g. 60,120")
     ap.add_argument("--total-insns", type=int, default=5_000_000)
-    # Perf post-process args (shared with cloud pipeline)
+    # Perf post-process args (shared with cloud stream processor)
     add_perf_postprocess_args(ap)
     ap.add_argument("--stride-top-k", type=int, default=20)
     # Too-short windows often yield no decoded insn trace from Intel PT.

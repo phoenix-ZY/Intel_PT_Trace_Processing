@@ -7,10 +7,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from intel_pt_trace_processing.core import portrait as insn_portrait
-from intel_pt_trace_processing.core.features import build_trace_profile, load_json_object
+from intel_pt_trace_processing.core.features import build_trace_profile
 from intel_pt_trace_processing.core.theory import TheoryConfig, predict_from_trace_profile
-from intel_pt_trace_processing.perf.pipeline import perf_postprocess_one
+from intel_pt_trace_processing.perf.stream import process_perf_stream
 
 
 @dataclass
@@ -23,18 +22,17 @@ class PerfProcessingConfig:
     symfs_dir: str | Path | None = None
     target_pid: str | None = None
 
-    recover_init_regs: str = "random"
-    recover_reg_staging: str = "dwt"
     recover_mvs: str = "on"
     recover_fill_seed: int = 1
-    recover_page_init: str = "zero"
-    recover_page_init_seed: int = 1
     recover_progress_every: int = 0
     recover_salvage_invalid_mem: bool = True
     recover_salvage_reads: bool = True
 
+    analysis_sdp_max_lines: int = 262144
     analysis_rd_hist_cap_lines: int = 262144
     analysis_stride_bin_cap_lines: int = 262144
+    split_crossline: str = "on"
+    rcx_soft_threshold: int = 128
 
     theory: TheoryConfig = field(default_factory=TheoryConfig)
     verbose: bool = False
@@ -46,8 +44,16 @@ class PerfProcessingConfig:
             raise ValueError("perf_max_insn_lines must be >= 0")
         if self.analysis_rd_hist_cap_lines < 0 or self.analysis_stride_bin_cap_lines < 0:
             raise ValueError("analysis cap lines must be >= 0")
+        if self.analysis_sdp_max_lines < 0:
+            raise ValueError("analysis_sdp_max_lines must be >= 0")
         if self.recover_progress_every < 0:
             raise ValueError("recover_progress_every must be >= 0")
+        if self.recover_mvs not in {"on", "off"}:
+            raise ValueError("recover_mvs must be on or off")
+        if self.split_crossline not in {"on", "off"}:
+            raise ValueError("split_crossline must be on or off")
+        if self.rcx_soft_threshold < 0:
+            raise ValueError("rcx_soft_threshold must be >= 0")
         if self.symfs_dir is not None and not Path(self.symfs_dir).is_dir():
             raise ValueError(f"symfs_dir is not a directory: {self.symfs_dir}")
 
@@ -93,16 +99,7 @@ def process_perf_data(
     report_dir = base_dir / "report"
 
     try:
-        (
-            aux_lost,
-            trace_errors,
-            insn_lines,
-            perf_insn,
-            perf_rec_mem,
-            perf_data_analysis,
-            perf_inst_analysis,
-            portrait_txt,
-        ) = perf_postprocess_one(
+        stream_result = process_perf_stream(
             script_dir=root,
             perf_tool=cfg.perf_tool,
             perf_data=perf_data_path,
@@ -112,50 +109,48 @@ def process_perf_data(
             report_dir=report_dir,
             perf_max_insn_lines=cfg.perf_max_insn_lines,
             line_size=cfg.line_size,
+            analysis_sdp_max_lines=cfg.analysis_sdp_max_lines,
             analysis_rd_hist_cap_lines=cfg.analysis_rd_hist_cap_lines,
             analysis_stride_bin_cap_lines=cfg.analysis_stride_bin_cap_lines,
-            recover_init_regs=cfg.recover_init_regs,
-            recover_reg_staging=cfg.recover_reg_staging,
             recover_mvs=cfg.recover_mvs,
             recover_fill_seed=cfg.recover_fill_seed,
-            recover_page_init=cfg.recover_page_init,
-            recover_page_init_seed=cfg.recover_page_init_seed,
             recover_progress_every=cfg.recover_progress_every,
             recover_salvage_invalid_mem=cfg.recover_salvage_invalid_mem,
             recover_salvage_reads=cfg.recover_salvage_reads,
             insn_portrait=cfg.insn_portrait,
+            split_crossline=cfg.split_crossline,
+            rcx_soft_threshold=cfg.rcx_soft_threshold,
             verbose=cfg.verbose,
             symfs_dir=cfg.symfs_dir,
             target_pid=cfg.target_pid,
         )
-
-        recover_report = report_dir / f"{prefix}.perf.recover.report.json"
-        portrait_features: dict[str, Any] | None = None
-        if cfg.insn_portrait and portrait_txt is not None and portrait_txt.is_file():
-            max_p = cfg.perf_max_insn_lines if cfg.perf_max_insn_lines > 0 else 0
-            portrait_features = insn_portrait.analyze_file(portrait_txt, max_insns=max_p)
+        stream_profile = stream_result.profile
+        portrait_features = stream_profile.get("portrait") if cfg.insn_portrait else None
 
         artifacts: dict[str, Path | None] = {
             "work_dir": base_dir,
-            "perf_instruction_trace": perf_insn,
-            "perf_recovered_memory": perf_rec_mem,
-            "data_analysis_json": perf_data_analysis,
-            "instruction_analysis_json": perf_inst_analysis,
-            "recover_report_json": recover_report,
-            "portrait_text": portrait_txt,
+            "stream_profile_json": stream_result.combined_json,
+            "perf_recovered_memory": stream_result.recovered_mem_jsonl,
+            "data_analysis_json": stream_result.data_analysis_json,
+            "instruction_analysis_json": stream_result.inst_analysis_json,
+            "recover_report_json": stream_result.recover_report_json,
+            "portrait_json": stream_result.portrait_json,
+            "perf_script_stderr": stream_result.perf_script_stderr,
+            "processor_stderr": stream_result.processor_stderr,
         }
         profile = build_trace_profile(
             source_kind="perf",
             source_path=perf_data_path,
             prefix=prefix,
-            data_locality=load_json_object(perf_data_analysis),
-            inst_locality=load_json_object(perf_inst_analysis),
-            insn_portrait=portrait_features,
-            recover_report=load_json_object(recover_report),
+            data_locality=stream_profile.get("data_locality", {}),
+            inst_locality=stream_profile.get("inst_locality", {}),
+            insn_portrait=portrait_features if isinstance(portrait_features, dict) else None,
+            recover_report=stream_profile.get("recover", {}),
             health={
-                "aux_lost": aux_lost,
-                "trace_errors": trace_errors,
-                "insn_lines": insn_lines,
+                "aux_lost": stream_result.aux_lost,
+                "trace_errors": stream_result.trace_errors,
+                "insn_lines": stream_result.insn_lines,
+                **(stream_profile.get("health", {}) if isinstance(stream_profile.get("health"), dict) else {}),
             },
             artifacts=artifacts,
             metadata=metadata,

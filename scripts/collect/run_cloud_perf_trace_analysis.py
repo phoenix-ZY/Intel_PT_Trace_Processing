@@ -6,10 +6,9 @@ Runs Redis, Nginx, HAProxy, PostgreSQL, MySQL, and Memcached — each with one
 classic benchmark configuration inside Docker, a bench-client (and ephemeral
 MySQL client for mysqlslap), and Intel PT traces from a single worker thread.
 
-After each configuration, runs the same perf-only pipeline as
-run_spec5_perf_trace_analysis.py (SPEC) / run_spec5_sde_perf_similarity.py --no-enable-sde:
-perf script decode, instruction-trace extraction, memory recovery via recover_mem_addrs_uc,
-and data/inst locality JSON reports. SDE is not used.
+After each configuration, streams perf script decode through trace_feature_processor
+to produce recovered memory, instruction/data locality, and instruction portrait
+JSON reports. SDE is not used.
 
 Trace file naming (unchanged):
     perf.<service>.<config>.<sample_index>.data
@@ -44,10 +43,11 @@ for _path in (REPO_ROOT, SRC_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from intel_pt_trace_processing.core import portrait as insn_portrait
-
-from intel_pt_trace_processing.perf.pipeline import perf_postprocess_one
-from intel_pt_trace_processing.perf.pipeline import add_perf_postprocess_args, validate_perf_postprocess_args
+from intel_pt_trace_processing.perf.stream import (
+    add_perf_postprocess_args,
+    process_perf_stream,
+    validate_perf_postprocess_args,
+)
 
 # ─── Defaults ────────────────────────────────────────────────────────────────
 
@@ -878,7 +878,7 @@ def iter_perf_data_files(output_dir: Path, bench_name: str) -> list[tuple[int, P
 
 
 def cloud_postprocess_reports_complete(output_dir: Path, bench_name: str) -> bool:
-    """True if every perf sample under output_dir has recover_mem_addrs_uc analysis JSONs in report/."""
+    """True if every perf sample under output_dir has stream-processor analysis JSONs in report/."""
     samples = iter_perf_data_files(output_dir, bench_name)
     if not samples:
         return False
@@ -903,13 +903,13 @@ def cloud_run_perf_postprocess(
     args: argparse.Namespace,
 ) -> None:
     """
-    perf script --insn-trace → insn trace extract → recover_mem_addrs_uc
+    perf script --insn-trace -> trace_feature_processor
     (same tool chain as run_spec5 with --no-enable-sde).
     """
-    recover_bin = script_dir / "recover_mem_addrs_uc"
-    if not recover_bin.is_file() or not os.access(recover_bin, os.X_OK):
+    processor_bin = script_dir / "trace_feature_processor"
+    if not processor_bin.is_file() or not os.access(processor_bin, os.X_OK):
         raise RuntimeError(
-            f"missing executable {recover_bin}; build it first (e.g. build_recover_mem_addrs_uc.sh)"
+            f"missing executable {processor_bin}; build it first (e.g. build_recover_mem_addrs_uc.sh)"
         )
 
     data_files = iter_perf_data_files(output_dir, bench_name)
@@ -954,10 +954,8 @@ def cloud_run_perf_postprocess(
         if not (perf_data_copy.is_file() and perf_data_copy.stat().st_size > 0):
             shutil.copy2(perf_data, perf_data_copy)
 
-        log("📜", f"Post-process sample {sample_idx}: perf script → extract → recover_mem_addrs_uc …")
-        if want_portrait and have_portrait_json:
-            want_portrait = False
-        aux_lost, trace_err, ninsn, _, perf_rec_mem, perf_data_analysis, perf_inst_analysis, portrait_txt = perf_postprocess_one(
+        log("📜", f"Post-process sample {sample_idx}: perf script → trace_feature_processor …")
+        result = process_perf_stream(
             script_dir=script_dir,
             perf_tool=perf_tool,
             perf_data=perf_data_copy,
@@ -967,50 +965,40 @@ def cloud_run_perf_postprocess(
             report_dir=report_dir,
             perf_max_insn_lines=args.perf_max_insn_lines,
             line_size=args.line_size,
+            analysis_sdp_max_lines=args.analysis_sdp_max_lines,
             analysis_rd_hist_cap_lines=args.analysis_rd_hist_cap_lines,
             analysis_stride_bin_cap_lines=args.analysis_stride_bin_cap_lines,
-            recover_init_regs=args.recover_init_regs,
-            recover_reg_staging=args.recover_reg_staging,
             recover_mvs=args.recover_mvs,
             recover_fill_seed=args.recover_fill_seed,
-            recover_page_init=args.recover_page_init,
-            recover_page_init_seed=args.recover_page_init_seed,
             recover_progress_every=args.recover_progress_every,
             recover_salvage_invalid_mem=args.recover_salvage_invalid_mem,
             recover_salvage_reads=args.recover_salvage_reads,
             insn_portrait=want_portrait,
+            split_crossline=args.split_crossline,
+            rcx_soft_threshold=args.rcx_soft_threshold,
             verbose=args.verbose_post,
         )
-
-        if want_portrait and portrait_txt is not None and portrait_txt.is_file() and portrait_txt.stat().st_size > 0:
-            max_p = args.perf_max_insn_lines if args.perf_max_insn_lines > 0 else 0
-            rep = insn_portrait.analyze_file(portrait_txt, max_insns=max_p)
-            rep["input_path"] = str(portrait_txt.resolve())
-            perf_insn_portrait_json.write_text(json.dumps(rep, indent=2, ensure_ascii=False), encoding="utf-8")
-            # Free space: portrait trace text can be large; JSON is the stable artifact.
-            try:
-                portrait_txt.unlink()
-            except FileNotFoundError:
-                pass
-            trace_profile_merged_json = report_dir / f"{prefix}.trace_profile.merged.json"
-            merged = {
-                "schema": "trace-profile-v1",
+        trace_profile_merged_json = report_dir / f"{prefix}.trace_profile.merged.json"
+        merged = result.profile
+        merged.update(
+            {
                 "bench": bench_name,
                 "sample_index": sample_idx,
                 "paths": {
                     "perf_data_copy": str(perf_data_copy),
-                    "perf_recovered_mem_jsonl": str(perf_rec_mem),
-                    "perf_data_analysis_json": str(perf_data_analysis),
-                    "perf_inst_analysis_json": str(perf_inst_analysis),
-                    "insn_portrait_json": str(perf_insn_portrait_json),
+                    "perf_recovered_mem_jsonl": str(result.recovered_mem_jsonl),
+                    "perf_data_analysis_json": str(result.data_analysis_json),
+                    "perf_inst_analysis_json": str(result.inst_analysis_json),
+                    "insn_portrait_json": str(result.portrait_json),
+                    "stream_profile_json": str(result.combined_json),
                 },
-                "insn_portrait": rep,
             }
-            trace_profile_merged_json.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+        )
+        trace_profile_merged_json.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
         log(
             "✅",
-            f"Sample {sample_idx}: data={Path(perf_data_analysis).name} inst={Path(perf_inst_analysis).name} "
-            f"(pt_aux_lost={aux_lost}, pt_trace_err={trace_err})",
+            f"Sample {sample_idx}: data={result.data_analysis_json.name} inst={result.inst_analysis_json.name} "
+            f"(pt_aux_lost={result.aux_lost}, pt_trace_err={result.trace_errors})",
         )
 
 
@@ -1421,7 +1409,7 @@ def run_single_config(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Collect Intel PT traces from cloud apps and run perf script + recover_mem_addrs_uc."
+        description="Collect Intel PT traces from cloud apps and run perf script + trace_feature_processor."
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
                         help=f"Directory for PT data files (default: {DEFAULT_OUTPUT_DIR})")
@@ -1451,7 +1439,7 @@ def main():
     parser.add_argument(
         "--no-post-process",
         action="store_true",
-        help="Skip perf script / insn extract / recover_mem_addrs_uc after each config",
+        help="Skip perf script / trace_feature_processor after each config",
     )
     parser.add_argument(
         "--stop-on-post-error",
@@ -1472,7 +1460,7 @@ def main():
     parser.add_argument(
         "--verbose-post",
         action="store_true",
-        help="Print post-process subprocess commands (perf script, recover_mem_addrs_uc)",
+        help="Print post-process subprocess commands (perf script, trace_feature_processor)",
     )
     parser.add_argument(
         "--show-tids",
@@ -1596,7 +1584,7 @@ def main():
     print(f"🕐 Bench dur  : {args.bench_duration}s per config")
     print(f"🔬 perf -m    : {args.perf_mmap_pages} (data,aux mmap pages)")
     print(f"🔬 intel_pt   : noretcomp={args.perf_pt_noretcomp}")
-    print(f"📊 Post-process: {'off' if args.no_post_process else 'perf script + recover_mem_addrs_uc'}\n")
+    print(f"📊 Post-process: {'off' if args.no_post_process else 'perf script + trace_feature_processor'}\n")
 
     config_index = 0
     benches_for_post: set[str] = set()

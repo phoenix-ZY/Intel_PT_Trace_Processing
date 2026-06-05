@@ -164,14 +164,11 @@ def extract_locality_feature_from_analysis_json(path: Path, *, access: str = "al
 
 
 def load_portrait_flat(path: Path) -> dict[str, float]:
-    """
-    Use the existing portrait JSON format; keep dependency on the repo local.
-    """
     # Local import to keep this module usable standalone.
-    from intel_pt_trace_processing.core import portrait as insn_portrait
+    from intel_pt_trace_processing.core.portrait_metrics import flatten_portrait_metrics
 
     obj = _load_json(path)
-    flat = insn_portrait.flatten_portrait_metrics(obj)
+    flat = flatten_portrait_metrics(obj)
     out: dict[str, float] = {}
     for k, v in flat.items():
         if isinstance(v, (int, float)):

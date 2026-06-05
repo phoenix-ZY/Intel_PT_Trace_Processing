@@ -3,7 +3,7 @@
 SPEC CPU 5xx: Intel PT capture + locality feature extraction (no SDE, no SDE-vs-perf compare).
 
 Runs the same perf path as `run_spec5_sde_perf_similarity.py --no-enable-sde`:
-  launch benchmark → perf record → perf script --insn-trace → recover_mem_addrs_uc
+  launch benchmark → perf record → perf script --insn-trace → trace_feature_processor
   → `*.perf.*.analysis.json` under each case's `report/`.
 
 For SDE reference traces and similarity scores against SDE, use:
@@ -27,7 +27,7 @@ from run_spec5_sde_perf_similarity import DEFAULT_REPRESENTATIVE_BENCHES, run_sp
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="SPEC5 batch: perf Intel PT + recover_mem_addrs_uc analysis only (no SDE)"
+        description="SPEC5 batch: perf Intel PT + trace_feature_processor analysis only (no SDE)"
     )
     ap.add_argument(
         "--spec-root",
@@ -56,35 +56,17 @@ def main() -> int:
     ap.add_argument("--trace-settle-timeout", type=float, default=300.0)
     ap.add_argument("--trace-settle-interval", type=float, default=1.0)
     ap.add_argument("--trace-stable-rounds", type=int, default=4)
-    ap.add_argument("--recover-init-regs", choices=["zero", "random"], default="random")
-    ap.add_argument(
-        "--recover-reg-staging",
-        choices=["legacy", "dwt"],
-        default="dwt",
-        help="register staging strategy passed to recover_mem_addrs_uc",
-    )
     ap.add_argument(
         "--recover-mvs",
         choices=["on", "off"],
         default="on",
-        help="whether to enable MVS in recover_mem_addrs_uc",
+        help="whether to enable MVS in trace_feature_processor",
     )
     ap.add_argument("--recover-fill-seed", type=int, default=1)
-    ap.add_argument(
-        "--recover-page-init",
-        choices=["zero", "random", "stable"],
-        default="zero",
-        help="page initialization policy for recover_mem_addrs_uc (default: zero)",
-    )
-    ap.add_argument(
-        "--recover-page-init-seed",
-        type=int,
-        default=1,
-        help="seed for page random initialization (used when --recover-page-init=random)",
-    )
     ap.add_argument("--recover-salvage-invalid-mem", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--recover-salvage-reads", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--recover-progress-every", type=int, default=0)
+    ap.add_argument("--analysis-sdp-max-lines", type=int, default=262144)
     ap.add_argument(
         "--analysis-rd-hist-cap-lines",
         type=int,
@@ -97,6 +79,8 @@ def main() -> int:
         default=262144,
         help="cap stride |delta| bins above this line distance into tail bucket (0 disables cap)",
     )
+    ap.add_argument("--split-crossline", choices=["on", "off"], default="on")
+    ap.add_argument("--rcx-soft-threshold", type=int, default=128)
     ap.add_argument(
         "--output-base",
         type=Path,
@@ -123,7 +107,7 @@ def main() -> int:
         "--insn-portrait",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Second perf script with --xed + instruction portrait JSON (perf needs Intel XED)",
+        help="Emit instruction portrait JSON from the one-pass stream processor",
     )
     ap.add_argument(
         "--perf-stream-sampling",

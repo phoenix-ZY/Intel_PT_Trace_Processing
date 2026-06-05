@@ -97,17 +97,16 @@ def _build_cli_config(args: Any) -> FeatureExtractionConfig:
         line_size=args.line_size,
         perf_max_insn_lines=args.perf_max_insn_lines,
         insn_portrait=args.insn_portrait,
-        recover_init_regs=args.recover_init_regs,
-        recover_reg_staging=args.recover_reg_staging,
         recover_mvs=args.recover_mvs,
         recover_fill_seed=args.recover_fill_seed,
-        recover_page_init=args.recover_page_init,
-        recover_page_init_seed=args.recover_page_init_seed,
         recover_progress_every=args.recover_progress_every,
         recover_salvage_invalid_mem=args.recover_salvage_invalid_mem,
         recover_salvage_reads=args.recover_salvage_reads,
+        analysis_sdp_max_lines=args.analysis_sdp_max_lines,
         analysis_rd_hist_cap_lines=args.analysis_rd_hist_cap_lines,
         analysis_stride_bin_cap_lines=args.analysis_stride_bin_cap_lines,
+        split_crossline=args.split_crossline,
+        rcx_soft_threshold=args.rcx_soft_threshold,
         verbose=args.verbose,
         symfs_dir=args.symfs_dir,
         target_pid=args.target_pid,
@@ -147,17 +146,16 @@ def main() -> int:
     parser.add_argument("--line-size", type=int, default=64, help="Cache line size (power of two)")
     parser.add_argument("--perf-max-insn-lines", type=int, default=5_000_000)
     parser.add_argument("--insn-portrait", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--recover-init-regs", choices=["zero", "random"], default="random")
-    parser.add_argument("--recover-reg-staging", choices=["legacy", "dwt"], default="dwt")
     parser.add_argument("--recover-mvs", choices=["on", "off"], default="on")
     parser.add_argument("--recover-fill-seed", type=int, default=1)
-    parser.add_argument("--recover-page-init", choices=["zero", "random", "stable"], default="zero")
-    parser.add_argument("--recover-page-init-seed", type=int, default=1)
     parser.add_argument("--recover-progress-every", type=int, default=0)
     parser.add_argument("--recover-salvage-invalid-mem", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--recover-salvage-reads", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--analysis-sdp-max-lines", type=int, default=262144)
     parser.add_argument("--analysis-rd-hist-cap-lines", type=int, default=262144)
     parser.add_argument("--analysis-stride-bin-cap-lines", type=int, default=262144)
+    parser.add_argument("--split-crossline", choices=["on", "off"], default="on")
+    parser.add_argument("--rcx-soft-threshold", type=int, default=128)
     parser.add_argument(
         "--theory-model",
         action=argparse.BooleanOptionalAction,

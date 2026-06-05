@@ -32,31 +32,46 @@ point is:
   - Public API for downstream projects.
   - Input: one `perf.data`.
   - Output: one `trace-profile-v1` software-feature dictionary or JSON file.
-  - It wraps `intel_pt_trace_processing.perf.pipeline.perf_postprocess_one()` and hides intermediate paths.
+  - It wraps `intel_pt_trace_processing.perf.stream.process_perf_stream()` and hides intermediate paths.
 
 The lower-level implementation is:
 
 - `src/intel_pt_trace_processing/perf/processor.py`
   - New Python-facing one-shot processor for `perf.data`.
   - Returns the normalized `trace-profile-v1` shape.
-- `src/intel_pt_trace_processing/perf/pipeline.py`
+- `src/intel_pt_trace_processing/perf/stream.py`
   - Shared perf-only post-processing:
-    `perf.data -> perf script --insn-trace -> instruction trace -> recovered memory -> analysis JSON`.
-- `csrc/recover_mem_addrs_uc.c`
-  - Unicorn-based recovery from decoded instruction trace.
-  - Emits recovered memory JSONL plus data/instruction locality analysis JSON.
+    `perf.data -> perf script --insn-trace -> trace_feature_processor -> analysis JSON`.
+- `csrc/trace_feature_processor.c`
+  - Unicorn-based recovery from decoded instruction stream.
+  - Emits recovered memory JSONL, data/instruction locality analysis, XED portrait statistics, and one combined JSON.
 - `csrc/trace_feature_core.c` / `csrc/trace_feature_core.h`
   - Shared RD/SDP/stride feature core.
-- `src/intel_pt_trace_processing/core/portrait.py`
-  - Optional instruction portrait from `perf script --xed` output.
+- `src/intel_pt_trace_processing/core/portrait_metrics.py`
+  - Flattens the portrait JSON emitted by `trace_feature_processor`.
 
-There is also a newer experimental one-pass C processor:
+The normalized profile shape is:
 
-- `csrc/trace_feature_processor.c`
-  - Streams `perf script --insn-trace` text from stdin and emits a combined feature JSON.
-  - Depends on XED headers and libraries.
-  - Currently useful as a faster future direction, but `trace_feature_api.py` still uses
-    the established package pipeline plus `recover_mem_addrs_uc` path.
+```json
+{
+  "schema": "trace-profile-v1",
+  "source": {"kind": "perf", "path": "..."},
+  "features": {
+    "data_memory": {},
+    "instruction_memory": {},
+    "instruction_portrait": {},
+    "recovery": {}
+  },
+  "health": {},
+  "artifacts": {},
+  "metadata": {},
+  "theory": {}
+}
+```
+
+Legacy top-level keys such as `data_locality`, `inst_locality`, `insn_portrait`,
+and `recover_report` are still emitted for compatibility. New code should prefer
+the `features.*` namespace.
 
 ## 3. Validate recovered perf features against SDE ground truth
 
@@ -119,13 +134,11 @@ perf.data
   -> downstream project attaches hardware parameters or runs its own model
 ```
 
-For the detailed migration plan, see `docs/REFACTOR_PLAN.md`.
-
 For validation:
 
 ```text
 SDE debugtrace -> csrc/analyze_sde_trace_uc -> SDE truth features
-perf.data      -> trace_feature_api/package pipeline -> recovered perf features
+perf.data      -> trace_feature_api/stream processor -> recovered perf features
 both           -> scripts/tools/compare_mem_trace_metrics.py -> similarity report
 ```
 

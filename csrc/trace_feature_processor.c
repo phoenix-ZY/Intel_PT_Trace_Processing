@@ -6,6 +6,7 @@
 
 #include <xed/xed-interface.h>
 
+#include <math.h>
 #include <unistd.h>
 
 typedef struct {
@@ -15,10 +16,69 @@ typedef struct {
     uint64_t iclasses[XED_ICLASS_LAST];
     uint64_t branches;
     uint64_t cond_branches;
+    uint64_t uncond_branches;
+    uint64_t indirect_branches;
     uint64_t calls;
+    uint64_t direct_calls;
+    uint64_t indirect_calls;
     uint64_t returns;
     uint64_t syscalls;
+    uint64_t operand_mix[16];
+    uint64_t branch_known;
+    uint64_t branch_taken;
+    uint64_t branch_not_taken;
+    uint64_t branch_unknown_next_ip;
+    U64Map branch_site_taken;
+    U64Map branch_site_not_taken;
+    U64Map branch_site_last_outcome;
+    U64Map branch_site_transitions;
+    U64Map gpr_last_read;
+    U64Map gpr_last_write;
+    U64Map vec_last_read;
+    U64Map vec_last_write;
+    uint64_t dep_count[6];
+    uint64_t dep_sum[6];
+    uint64_t dep_buckets[6][5];
+    uint64_t ipc_lines;
+    uint64_t ipc_value_count;
+    double ipc_value_sum;
+    uint64_t ipc_retire_count;
+    uint64_t ipc_retire_num_sum;
+    uint64_t ipc_retire_den_sum;
 } PortraitStats;
+
+typedef enum {
+    OPMIX_REG_TO_REG = 0,
+    OPMIX_REG_TO_MEM = 1,
+    OPMIX_MEM_TO_REG = 2,
+    OPMIX_MEM_TO_MEM = 3,
+    OPMIX_IMM_TO_REG = 4,
+    OPMIX_IMM_TO_MEM = 5,
+    OPMIX_REG = 6,
+    OPMIX_MEM = 7,
+    OPMIX_IMM = 8,
+    OPMIX_NONE = 9,
+    OPMIX_OTHER = 10,
+    OPMIX_COUNT = 11,
+} OpMixKind;
+
+typedef enum {
+    OP_KIND_NONE = 0,
+    OP_KIND_REG = 1,
+    OP_KIND_MEM = 2,
+    OP_KIND_IMM = 3,
+    OP_KIND_OTHER = 4,
+} OperandKind;
+
+typedef enum {
+    DEP_GPR_RAW = 0,
+    DEP_GPR_WAW = 1,
+    DEP_GPR_WAR = 2,
+    DEP_VEC_RAW = 3,
+    DEP_VEC_WAW = 4,
+    DEP_VEC_WAR = 5,
+    DEP_KIND_COUNT = 6,
+} DepKind;
 
 typedef struct {
     const char *out_path;
@@ -77,7 +137,208 @@ static bool portrait_is_branch_category(xed_category_enum_t category) {
            category == XED_CATEGORY_RET;
 }
 
-static void portrait_add(PortraitStats *stats, const TraceInsn *insn) {
+static bool portrait_action_reads(const xed_operand_t *op) {
+    xed_operand_action_enum_t rw = xed_operand_rw(op);
+    return xed_operand_action_read(rw) || xed_operand_action_conditional_read(rw);
+}
+
+static bool portrait_action_writes(const xed_operand_t *op) {
+    xed_operand_action_enum_t rw = xed_operand_rw(op);
+    return xed_operand_action_written(rw) || xed_operand_action_conditional_write(rw);
+}
+
+static bool portrait_is_gpr(xed_reg_enum_t reg) {
+    xed_reg_class_enum_t cls = xed_reg_class(reg);
+    return cls == XED_REG_CLASS_GPR ||
+           cls == XED_REG_CLASS_GPR8 ||
+           cls == XED_REG_CLASS_GPR16 ||
+           cls == XED_REG_CLASS_GPR32 ||
+           cls == XED_REG_CLASS_GPR64;
+}
+
+static bool portrait_is_vec(xed_reg_enum_t reg) {
+    xed_reg_class_enum_t cls = xed_reg_class(reg);
+    return cls == XED_REG_CLASS_XMM ||
+           cls == XED_REG_CLASS_YMM ||
+           cls == XED_REG_CLASS_ZMM ||
+           cls == XED_REG_CLASS_MASK;
+}
+
+static xed_reg_enum_t portrait_normalize_reg(xed_reg_enum_t reg) {
+    if (reg == XED_REG_INVALID) return reg;
+    return xed_get_largest_enclosing_register(reg);
+}
+
+static uint64_t portrait_reg_key(uint32_t tid, xed_reg_enum_t reg) {
+    return (((uint64_t)tid) << 32) ^ (uint64_t)reg;
+}
+
+static int portrait_dep_bucket(uint64_t d) {
+    if (d == 0) return 0;
+    if (d <= 4) return 1;
+    if (d <= 16) return 2;
+    if (d <= 64) return 3;
+    return 4;
+}
+
+static void portrait_dep_add(PortraitStats *stats, DepKind kind, uint64_t d) {
+    if (!stats || kind >= DEP_KIND_COUNT) return;
+    stats->dep_count[kind]++;
+    stats->dep_sum[kind] += d;
+    stats->dep_buckets[kind][portrait_dep_bucket(d)]++;
+}
+
+static void portrait_track_reg_deps(
+    PortraitStats *stats,
+    uint32_t tid,
+    xed_reg_enum_t reg,
+    bool reads,
+    bool writes,
+    uint64_t insn_idx
+) {
+    if (!stats || reg == XED_REG_INVALID) return;
+    xed_reg_enum_t nr = portrait_normalize_reg(reg);
+    if (nr == XED_REG_INVALID) return;
+    bool is_gpr = portrait_is_gpr(nr);
+    bool is_vec = portrait_is_vec(nr);
+    if (!is_gpr && !is_vec) return;
+
+    U64Map *last_read = is_gpr ? &stats->gpr_last_read : &stats->vec_last_read;
+    U64Map *last_write = is_gpr ? &stats->gpr_last_write : &stats->vec_last_write;
+    DepKind raw_kind = is_gpr ? DEP_GPR_RAW : DEP_VEC_RAW;
+    DepKind waw_kind = is_gpr ? DEP_GPR_WAW : DEP_VEC_WAW;
+    DepKind war_kind = is_gpr ? DEP_GPR_WAR : DEP_VEC_WAR;
+    uint64_t key = portrait_reg_key(tid, nr);
+    uint64_t last = 0;
+
+    if (reads && map_get(last_write, key, &last) && insn_idx >= last) {
+        portrait_dep_add(stats, raw_kind, insn_idx - last);
+    }
+    if (writes && map_get(last_write, key, &last) && insn_idx >= last) {
+        portrait_dep_add(stats, waw_kind, insn_idx - last);
+    }
+    if (writes && map_get(last_read, key, &last) && insn_idx >= last) {
+        portrait_dep_add(stats, war_kind, insn_idx - last);
+    }
+}
+
+static void portrait_commit_reg_access(
+    PortraitStats *stats,
+    uint32_t tid,
+    xed_reg_enum_t reg,
+    bool reads,
+    bool writes,
+    uint64_t insn_idx
+) {
+    if (!stats || reg == XED_REG_INVALID) return;
+    xed_reg_enum_t nr = portrait_normalize_reg(reg);
+    if (nr == XED_REG_INVALID) return;
+    bool is_gpr = portrait_is_gpr(nr);
+    bool is_vec = portrait_is_vec(nr);
+    if (!is_gpr && !is_vec) return;
+    uint64_t key = portrait_reg_key(tid, nr);
+    if (reads) map_put(is_gpr ? &stats->gpr_last_read : &stats->vec_last_read, key, insn_idx);
+    if (writes) map_put(is_gpr ? &stats->gpr_last_write : &stats->vec_last_write, key, insn_idx);
+}
+
+static OperandKind portrait_operand_kind_from_name(xed_operand_enum_t name) {
+    if (name == XED_OPERAND_MEM0 || name == XED_OPERAND_MEM1 || name == XED_OPERAND_AGEN) return OP_KIND_MEM;
+    if (name == XED_OPERAND_IMM0 || name == XED_OPERAND_IMM1 || name == XED_OPERAND_UIMM0 ||
+        name == XED_OPERAND_UIMM1 || name == XED_OPERAND_PTR || name == XED_OPERAND_RELBR) return OP_KIND_IMM;
+    if (xed_operand_is_register(name)) return OP_KIND_REG;
+    return OP_KIND_OTHER;
+}
+
+static OpMixKind portrait_pair_opmix_kind(OperandKind src, OperandKind dst) {
+    if (src == OP_KIND_REG && dst == OP_KIND_REG) return OPMIX_REG_TO_REG;
+    if (src == OP_KIND_REG && dst == OP_KIND_MEM) return OPMIX_REG_TO_MEM;
+    if (src == OP_KIND_MEM && dst == OP_KIND_REG) return OPMIX_MEM_TO_REG;
+    if (src == OP_KIND_MEM && dst == OP_KIND_MEM) return OPMIX_MEM_TO_MEM;
+    if (src == OP_KIND_IMM && dst == OP_KIND_REG) return OPMIX_IMM_TO_REG;
+    if (src == OP_KIND_IMM && dst == OP_KIND_MEM) return OPMIX_IMM_TO_MEM;
+    return OPMIX_OTHER;
+}
+
+static OpMixKind portrait_single_opmix_kind(OperandKind k) {
+    if (k == OP_KIND_REG) return OPMIX_REG;
+    if (k == OP_KIND_MEM) return OPMIX_MEM;
+    if (k == OP_KIND_IMM) return OPMIX_IMM;
+    if (k == OP_KIND_NONE) return OPMIX_NONE;
+    return OPMIX_OTHER;
+}
+
+static uint64_t portrait_branch_target(const TraceInsn *insn, const xed_decoded_inst_t *decoded_inst) {
+    unsigned int width = xed_decoded_inst_get_branch_displacement_width(decoded_inst);
+    if (!insn || width == 0) return 0;
+    int64_t disp = xed_decoded_inst_get_branch_displacement(decoded_inst);
+    return (uint64_t)((int64_t)(insn->ip + insn->code_len) + disp);
+}
+
+static void portrait_add_branch_outcome(PortraitStats *stats, const TraceInsn *insn, const TraceInsn *next, uint64_t target) {
+    if (!stats || !insn || target == 0) return;
+    uint64_t site = mix64((((uint64_t)insn->tid) << 32) ^ insn->ip);
+    if (!next || next->tid != insn->tid) {
+        stats->branch_unknown_next_ip++;
+        return;
+    }
+    bool taken = next->ip == target;
+    stats->branch_known++;
+    if (taken) stats->branch_taken++;
+    else stats->branch_not_taken++;
+
+    U64Map *site_map = taken ? &stats->branch_site_taken : &stats->branch_site_not_taken;
+    uint64_t cur = 0;
+    if (!map_get(site_map, site, &cur)) cur = 0;
+    map_put(site_map, site, cur + 1);
+
+    uint64_t last = 0;
+    if (map_get(&stats->branch_site_last_outcome, site, &last) && last != (uint64_t)taken) {
+        uint64_t tr = 0;
+        if (!map_get(&stats->branch_site_transitions, site, &tr)) tr = 0;
+        map_put(&stats->branch_site_transitions, site, tr + 1);
+    }
+    map_put(&stats->branch_site_last_outcome, site, (uint64_t)taken);
+}
+
+static void portrait_add_ipc_tail(PortraitStats *stats, const char *line) {
+    if (!stats || !line) return;
+    const char *ipc = strstr(line, "IPC:");
+    if (!ipc) return;
+    stats->ipc_lines++;
+    ipc += 4;
+    while (*ipc == ' ' || *ipc == '\t') ipc++;
+
+    char *end = NULL;
+    double val = strtod(ipc, &end);
+    bool had_value = false;
+    if (end != ipc) {
+        had_value = true;
+        stats->ipc_value_count++;
+        stats->ipc_value_sum += val;
+        ipc = end;
+    }
+
+    const char *lp = strchr(ipc, '(');
+    if (!lp) return;
+    lp++;
+    errno = 0;
+    char *mid = NULL;
+    uint64_t n = strtoull(lp, &mid, 10);
+    if (errno || mid == lp || *mid != '/') return;
+    errno = 0;
+    char *rp = NULL;
+    uint64_t d = strtoull(mid + 1, &rp, 10);
+    if (errno || rp == mid + 1) return;
+    stats->ipc_retire_count++;
+    stats->ipc_retire_num_sum += n;
+    stats->ipc_retire_den_sum += d;
+    if (!had_value && d > 0) {
+        stats->ipc_value_count++;
+        stats->ipc_value_sum += (double)n / (double)d;
+    }
+}
+
+static void portrait_add(PortraitStats *stats, const TraceInsn *insn, const TraceInsn *next, uint64_t insn_idx) {
     xed_decoded_inst_t decoded_inst;
     xed_decoded_inst_zero(&decoded_inst);
     xed_decoded_inst_set_mode(&decoded_inst, XED_MACHINE_MODE_LONG_64, XED_ADDRESS_WIDTH_64b);
@@ -93,12 +354,99 @@ static void portrait_add(PortraitStats *stats, const TraceInsn *insn) {
     if ((unsigned int)category < XED_CATEGORY_LAST) stats->categories[category]++;
     if ((unsigned int)iclass < XED_ICLASS_LAST) stats->iclasses[iclass]++;
 
+    uint64_t branch_target = 0;
+    if (category == XED_CATEGORY_COND_BR || category == XED_CATEGORY_UNCOND_BR || category == XED_CATEGORY_CALL) {
+        branch_target = portrait_branch_target(insn, &decoded_inst);
+    }
+
     if (portrait_is_branch_category(category)) stats->branches++;
     if (category == XED_CATEGORY_COND_BR) stats->cond_branches++;
-    if (category == XED_CATEGORY_CALL) stats->calls++;
+    if (category == XED_CATEGORY_UNCOND_BR) {
+        if (branch_target) stats->uncond_branches++;
+        else stats->indirect_branches++;
+    }
+    if (category == XED_CATEGORY_CALL) {
+        stats->calls++;
+        if (branch_target) stats->direct_calls++;
+        else stats->indirect_calls++;
+    }
     if (category == XED_CATEGORY_RET) stats->returns++;
     if (category == XED_CATEGORY_SYSCALL || iclass == XED_ICLASS_SYSCALL || iclass == XED_ICLASS_SYSENTER) {
         stats->syscalls++;
+    }
+
+    const xed_inst_t *xi = xed_decoded_inst_inst(&decoded_inst);
+    unsigned int nops = xed_inst_noperands(xi);
+    OperandKind src_kind = OP_KIND_NONE;
+    OperandKind dst_kind = OP_KIND_NONE;
+    OperandKind explicit_kinds[4] = {OP_KIND_NONE, OP_KIND_NONE, OP_KIND_NONE, OP_KIND_NONE};
+    unsigned int explicit_count = 0;
+
+    xed_reg_enum_t regs[32];
+    bool reg_reads[32];
+    bool reg_writes[32];
+    unsigned int reg_count = 0;
+
+    for (unsigned int i = 0; i < nops; i++) {
+        const xed_operand_t *op = xed_inst_operand(xi, i);
+        xed_operand_enum_t name = xed_operand_name(op);
+        xed_operand_visibility_enum_t vis = xed_operand_operand_visibility(op);
+        bool reads = portrait_action_reads(op);
+        bool writes = portrait_action_writes(op);
+        OperandKind kind = portrait_operand_kind_from_name(name);
+
+        if (vis == XED_OPVIS_EXPLICIT && explicit_count < 4) explicit_kinds[explicit_count++] = kind;
+        if (reads && !writes && src_kind == OP_KIND_NONE) src_kind = kind;
+        if (writes && dst_kind == OP_KIND_NONE) dst_kind = kind;
+
+        if (xed_operand_is_register(name)) {
+            xed_reg_enum_t reg = xed_decoded_inst_get_reg(&decoded_inst, name);
+            if (reg != XED_REG_INVALID && reg_count < 32) {
+                regs[reg_count] = reg;
+                reg_reads[reg_count] = reads;
+                reg_writes[reg_count] = writes;
+                reg_count++;
+            }
+        }
+    }
+
+    unsigned int memops = xed_decoded_inst_number_of_memory_operands(&decoded_inst);
+    for (unsigned int mi = 0; mi < memops; mi++) {
+        xed_reg_enum_t base = xed_decoded_inst_get_base_reg(&decoded_inst, mi);
+        xed_reg_enum_t index = xed_decoded_inst_get_index_reg(&decoded_inst, mi);
+        if (base != XED_REG_INVALID && reg_count < 32) {
+            regs[reg_count] = base;
+            reg_reads[reg_count] = true;
+            reg_writes[reg_count] = false;
+            reg_count++;
+        }
+        if (index != XED_REG_INVALID && reg_count < 32) {
+            regs[reg_count] = index;
+            reg_reads[reg_count] = true;
+            reg_writes[reg_count] = false;
+            reg_count++;
+        }
+    }
+
+    for (unsigned int i = 0; i < reg_count; i++) {
+        portrait_track_reg_deps(stats, insn->tid, regs[i], reg_reads[i], reg_writes[i], insn_idx);
+    }
+    for (unsigned int i = 0; i < reg_count; i++) {
+        portrait_commit_reg_access(stats, insn->tid, regs[i], reg_reads[i], reg_writes[i], insn_idx);
+    }
+
+    if (src_kind != OP_KIND_NONE || dst_kind != OP_KIND_NONE) {
+        stats->operand_mix[portrait_pair_opmix_kind(src_kind, dst_kind)]++;
+    } else if (explicit_count >= 2) {
+        stats->operand_mix[portrait_pair_opmix_kind(explicit_kinds[1], explicit_kinds[0])]++;
+    } else if (explicit_count == 1) {
+        stats->operand_mix[portrait_single_opmix_kind(explicit_kinds[0])]++;
+    } else {
+        stats->operand_mix[OPMIX_NONE]++;
+    }
+
+    if (category == XED_CATEGORY_COND_BR || category == XED_CATEGORY_UNCOND_BR || category == XED_CATEGORY_CALL) {
+        portrait_add_branch_outcome(stats, insn, next, branch_target);
     }
 }
 
@@ -138,6 +486,198 @@ static void write_iclass_counts(FILE *out, const PortraitStats *stats) {
         first = false;
     }
     fprintf(out, "\n    ]");
+}
+
+static const char *opmix_name(unsigned int idx) {
+    switch (idx) {
+        case OPMIX_REG_TO_REG: return "reg_to_reg";
+        case OPMIX_REG_TO_MEM: return "reg_to_mem";
+        case OPMIX_MEM_TO_REG: return "mem_to_reg";
+        case OPMIX_MEM_TO_MEM: return "mem_to_mem";
+        case OPMIX_IMM_TO_REG: return "imm_to_reg";
+        case OPMIX_IMM_TO_MEM: return "imm_to_mem";
+        case OPMIX_REG: return "reg";
+        case OPMIX_MEM: return "mem";
+        case OPMIX_IMM: return "imm";
+        case OPMIX_NONE: return "none";
+        case OPMIX_OTHER:
+        default: return "other";
+    }
+}
+
+static const char *dep_name(unsigned int idx) {
+    switch (idx) {
+        case DEP_GPR_RAW:
+        case DEP_VEC_RAW: return "raw";
+        case DEP_GPR_WAW:
+        case DEP_VEC_WAW: return "waw";
+        case DEP_GPR_WAR:
+        case DEP_VEC_WAR: return "war";
+        default: return "unknown";
+    }
+}
+
+static double h2(double p) {
+    if (p <= 0.0 || p >= 1.0) return 0.0;
+    return -(p * log2(p) + (1.0 - p) * log2(1.0 - p));
+}
+
+static uint64_t map_count_or_zero(const U64Map *m, uint64_t key) {
+    uint64_t v = 0;
+    return map_get(m, key, &v) ? v : 0;
+}
+
+static void write_named_counter(FILE *out, const char *name, const uint64_t *counts, unsigned int n, const char *(*name_fn)(unsigned int)) {
+    fprintf(out, "    \"%s\": {\"counts\": {", name);
+    bool first = true;
+    uint64_t total = 0;
+    for (unsigned int i = 0; i < n; i++) total += counts[i];
+    for (unsigned int i = 0; i < n; i++) {
+        if (!counts[i]) continue;
+        fprintf(out, "%s\"%s\": %" PRIu64, first ? "" : ", ", name_fn(i), counts[i]);
+        first = false;
+    }
+    fprintf(out, "}, \"fractions\": {");
+    first = true;
+    for (unsigned int i = 0; i < n; i++) {
+        if (!counts[i]) continue;
+        double frac = total ? (double)counts[i] / (double)total : 0.0;
+        fprintf(out, "%s\"%s\": %.12g", first ? "" : ", ", name_fn(i), frac);
+        first = false;
+    }
+    fprintf(out, "}}");
+}
+
+static void write_dep_block(FILE *out, const PortraitStats *stats, const char *name, unsigned int base) {
+    fprintf(out, "    \"%s\": {\n", name);
+    for (unsigned int j = 0; j < 3; j++) {
+        unsigned int idx = base + j;
+        uint64_t count = stats->dep_count[idx];
+        double mean = count ? (double)stats->dep_sum[idx] / (double)count : 0.0;
+        fprintf(out, "      \"%s\": {\"count\": %" PRIu64 ", \"mean\": %.12g, \"median\": null, \"buckets\": {",
+                dep_name(idx), count, mean);
+        const char *bucket_names[5] = {"0", "1-4", "5-16", "17-64", "65+"};
+        bool first = true;
+        for (unsigned int b = 0; b < 5; b++) {
+            if (!stats->dep_buckets[idx][b]) continue;
+            fprintf(out, "%s\"%s\": %" PRIu64, first ? "" : ", ", bucket_names[b], stats->dep_buckets[idx][b]);
+            first = false;
+        }
+        fprintf(out, "}}%s\n", j == 2 ? "" : ",");
+    }
+    fprintf(out, "    }");
+}
+
+static void write_branch_behavior(FILE *out, const PortraitStats *stats) {
+    double taken_rate = stats->branch_known ? (double)stats->branch_taken / (double)stats->branch_known : 0.0;
+    double site_weight = 0.0;
+    double site_entropy_sum = 0.0;
+    double site_transition_sum = 0.0;
+    uint64_t sites_with_known = 0;
+
+    for (size_t i = 0; i < stats->branch_site_taken.cap; i++) {
+        if (!stats->branch_site_taken.used[i]) continue;
+        uint64_t key = stats->branch_site_taken.keys[i];
+        uint64_t taken = stats->branch_site_taken.vals[i];
+        uint64_t not_taken = map_count_or_zero(&stats->branch_site_not_taken, key);
+        uint64_t known = taken + not_taken;
+        if (!known) continue;
+        sites_with_known++;
+        double p = (double)taken / (double)known;
+        double ent = h2(p);
+        uint64_t transitions = map_count_or_zero(&stats->branch_site_transitions, key);
+        double tr = known > 1 ? (double)transitions / (double)(known - 1) : 0.0;
+        site_weight += (double)known;
+        site_entropy_sum += ent * (double)known;
+        site_transition_sum += tr * (double)known;
+    }
+    for (size_t i = 0; i < stats->branch_site_not_taken.cap; i++) {
+        if (!stats->branch_site_not_taken.used[i]) continue;
+        uint64_t key = stats->branch_site_not_taken.keys[i];
+        if (map_count_or_zero(&stats->branch_site_taken, key)) continue;
+        uint64_t not_taken = stats->branch_site_not_taken.vals[i];
+        if (!not_taken) continue;
+        sites_with_known++;
+        site_weight += (double)not_taken;
+        site_entropy_sum += 0.0;
+        site_transition_sum += 0.0;
+    }
+
+    fprintf(out,
+        "    \"branch_behavior\": {\n"
+        "      \"global\": {\"known_total\": %" PRIu64 ", \"unknown_next_ip_total\": %" PRIu64 ", \"taken_total\": %" PRIu64 ", \"not_taken_total\": %" PRIu64 ", \"taken_rate\": %.12g, \"entropy\": %.12g},\n"
+        "      \"site_weighted\": {\"sites_with_known\": %" PRIu64 ", \"entropy_mean\": %.12g, \"transition_rate_mean\": %.12g}\n"
+        "    }",
+        stats->branch_known,
+        stats->branch_unknown_next_ip,
+        stats->branch_taken,
+        stats->branch_not_taken,
+        taken_rate,
+        h2(taken_rate),
+        sites_with_known,
+        site_weight > 0.0 ? site_entropy_sum / site_weight : 0.0,
+        site_weight > 0.0 ? site_transition_sum / site_weight : 0.0
+    );
+}
+
+static void write_branch_summary(FILE *out, const PortraitStats *stats) {
+    const uint64_t counts[6] = {
+        stats->cond_branches,
+        stats->uncond_branches,
+        stats->indirect_branches,
+        stats->direct_calls,
+        stats->indirect_calls,
+        stats->returns,
+    };
+    const char *names[6] = {
+        "conditional",
+        "unconditional",
+        "indirect",
+        "call_direct",
+        "call_indirect",
+        "return",
+    };
+    double denom = stats->decoded ? (double)stats->decoded : 1.0;
+    fprintf(out, "    \"branch\": {\"detail_counts\": {");
+    for (unsigned int i = 0; i < 6; i++) {
+        fprintf(out, "%s\"%s\": %" PRIu64, i ? ", " : "", names[i], counts[i]);
+    }
+    fprintf(out, "}, \"per_1000_insns\": {");
+    for (unsigned int i = 0; i < 6; i++) {
+        fprintf(out, "%s\"%s\": %.12g", i ? ", " : "", names[i], 1000.0 * (double)counts[i] / denom);
+    }
+    fprintf(out, "}}");
+}
+
+static void write_syscall_summary(FILE *out, const PortraitStats *stats) {
+    double denom = stats->decoded ? (double)stats->decoded : 1.0;
+    fprintf(
+        out,
+        "    \"syscall\": {\"approx_insn_count\": %" PRIu64 ", \"per_1000_insns\": %.12g}",
+        stats->syscalls,
+        1000.0 * (double)stats->syscalls / denom
+    );
+}
+
+static void write_ipc_block(FILE *out, const PortraitStats *stats) {
+    fprintf(out, "    \"ipc\": {\"annotated_blocks\": %" PRIu64, stats->ipc_lines);
+    if (stats->ipc_value_count) {
+        fprintf(out, ", \"values\": {\"mean\": %.12g}", stats->ipc_value_sum / (double)stats->ipc_value_count);
+    } else {
+        fprintf(out, ", \"values\": {}");
+    }
+    if (stats->ipc_retire_count) {
+        double mean = 0.0;
+        if (stats->ipc_retire_den_sum) {
+            mean = (double)stats->ipc_retire_num_sum / (double)stats->ipc_retire_den_sum;
+        }
+        fprintf(out, ", \"retire_ratio\": {\"mean\": %.12g}, \"total\": {\"insns\": %" PRIu64 ", \"cycles\": %" PRIu64 ", \"ipc\": %.12g}",
+                mean,
+                stats->ipc_retire_num_sum,
+                stats->ipc_retire_den_sum,
+                stats->ipc_retire_den_sum ? (double)stats->ipc_retire_num_sum / (double)stats->ipc_retire_den_sum : 0.0);
+    }
+    fprintf(out, "}");
 }
 
 static char *profile_json_to_string(
@@ -230,16 +770,38 @@ static void write_combined_json(
     fprintf(out, "  },\n");
 
     fprintf(out, "  \"portrait\": {\n");
+    fprintf(out, "    \"stats\": {\"parsed_instructions\": %" PRIu64 ", \"skipped_lines\": %" PRIu64 ", \"lines_with_ipc_annotation\": %" PRIu64 "},\n",
+            portrait->decoded,
+            portrait->decode_errors,
+            portrait->ipc_lines);
     fprintf(out, "    \"decoded\": %" PRIu64 ",\n", portrait->decoded);
     fprintf(out, "    \"decode_errors\": %" PRIu64 ",\n", portrait->decode_errors);
     fprintf(out, "    \"branches\": %" PRIu64 ",\n", portrait->branches);
     fprintf(out, "    \"cond_branches\": %" PRIu64 ",\n", portrait->cond_branches);
+    fprintf(out, "    \"uncond_branches\": %" PRIu64 ",\n", portrait->uncond_branches);
+    fprintf(out, "    \"indirect_branches\": %" PRIu64 ",\n", portrait->indirect_branches);
     fprintf(out, "    \"calls\": %" PRIu64 ",\n", portrait->calls);
+    fprintf(out, "    \"direct_calls\": %" PRIu64 ",\n", portrait->direct_calls);
+    fprintf(out, "    \"indirect_calls\": %" PRIu64 ",\n", portrait->indirect_calls);
     fprintf(out, "    \"returns\": %" PRIu64 ",\n", portrait->returns);
     fprintf(out, "    \"syscalls\": %" PRIu64 ",\n", portrait->syscalls);
     write_category_counts(out, portrait);
     fprintf(out, ",\n");
     write_iclass_counts(out, portrait);
+    fprintf(out, ",\n");
+    write_named_counter(out, "operand_mix", portrait->operand_mix, OPMIX_COUNT, opmix_name);
+    fprintf(out, ",\n");
+    write_branch_summary(out, portrait);
+    fprintf(out, ",\n");
+    write_branch_behavior(out, portrait);
+    fprintf(out, ",\n");
+    write_syscall_summary(out, portrait);
+    fprintf(out, ",\n");
+    write_ipc_block(out, portrait);
+    fprintf(out, ",\n");
+    write_dep_block(out, portrait, "gpr_dependency_distance", DEP_GPR_RAW);
+    fprintf(out, ",\n");
+    write_dep_block(out, portrait, "vec_dependency_distance", DEP_VEC_RAW);
     fprintf(out, "\n  },\n");
 
     fprintf(out, "  \"inst_locality\": %s,\n", inst_json);
@@ -452,8 +1014,17 @@ int main(int argc, char **argv) {
     uint64_t invalid_insn_errors = 0;
     uint64_t salvaged_invalid_insns = 0;
     PortraitStats portrait = {0};
+    map_init(&portrait.branch_site_taken, 1 << 12);
+    map_init(&portrait.branch_site_not_taken, 1 << 12);
+    map_init(&portrait.branch_site_last_outcome, 1 << 12);
+    map_init(&portrait.branch_site_transitions, 1 << 12);
+    map_init(&portrait.gpr_last_read, 1 << 12);
+    map_init(&portrait.gpr_last_write, 1 << 12);
+    map_init(&portrait.vec_last_read, 1 << 12);
+    map_init(&portrait.vec_last_write, 1 << 12);
 
     while (fgets(line, sizeof(line), stdin)) {
+        portrait_add_ipc_tail(&portrait, line);
         if (!parse_trace_line(line, &cur)) continue;
         parsed_lines++;
         if (!has_prev) {
@@ -486,7 +1057,7 @@ int main(int argc, char **argv) {
         ctx.cur_ip = prev.ip;
         ctx.cur_insn = &prev;
         tf_profile_add_inst(inst_profile, prev.tid, prev.ip);
-        portrait_add(&portrait, &prev);
+        portrait_add(&portrait, &prev, &cur, executed);
         uc_reg_write(uc, UC_X86_REG_RIP, &cur_addr);
         apply_rcx_soft_threshold(&ctx, opts.rcx_soft_threshold, &prev);
         if (is_syscall_bytes(&prev)) {
@@ -528,7 +1099,7 @@ int main(int argc, char **argv) {
         ctx.cur_ip = prev.ip;
         ctx.cur_insn = &prev;
         tf_profile_add_inst(inst_profile, prev.tid, prev.ip);
-        portrait_add(&portrait, &prev);
+        portrait_add(&portrait, &prev, NULL, executed);
         uc_reg_write(uc, UC_X86_REG_RIP, &last_addr);
         apply_rcx_soft_threshold(&ctx, opts.rcx_soft_threshold, &prev);
         if (is_syscall_bytes(&prev)) {
@@ -580,6 +1151,14 @@ int main(int argc, char **argv) {
     map_free(&ctx.mvs_pc_step);
     map_free(&ctx.syscall_hist);
     set_free(&ctx.mvs_seeded_qw);
+    map_free(&portrait.branch_site_taken);
+    map_free(&portrait.branch_site_not_taken);
+    map_free(&portrait.branch_site_last_outcome);
+    map_free(&portrait.branch_site_transitions);
+    map_free(&portrait.gpr_last_read);
+    map_free(&portrait.gpr_last_write);
+    map_free(&portrait.vec_last_read);
+    map_free(&portrait.vec_last_write);
     tf_profile_destroy(inst_profile);
     tf_profile_destroy(data_profile);
     uc_close(uc);
