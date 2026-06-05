@@ -36,6 +36,9 @@ point is:
 
 The lower-level implementation is:
 
+- `src/intel_pt_trace_processing/perf/processor.py`
+  - New Python-facing one-shot processor for `perf.data`.
+  - Returns the normalized `trace-profile-v1` shape.
 - `perf_pipeline.py`
   - Shared perf-only post-processing:
     `perf.data -> perf script --insn-trace -> instruction trace -> recovered memory -> analysis JSON`.
@@ -82,6 +85,9 @@ applies a configurable analytical model.
   - MIIC-inspired interval model.
   - Uses data/instruction locality, instruction portrait, branch behavior, and
     configurable microarchitecture parameters.
+- `src/intel_pt_trace_processing/core/theory.py`
+  - Optional model hook boundary.
+  - Provides an initial post-pass MIIC interval prediction for normalized profiles.
 - `run_miic_interval_backend.py`
   - Batch runner over existing `report/*.perf.recovered.data.analysis.json` outputs.
 
@@ -112,6 +118,8 @@ perf.data
   -> trace-profile-v1 JSON
   -> downstream project attaches hardware parameters or runs its own model
 ```
+
+For the detailed migration plan, see `docs/REFACTOR_PLAN.md`.
 
 For validation:
 

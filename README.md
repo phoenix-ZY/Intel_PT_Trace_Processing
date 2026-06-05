@@ -10,7 +10,8 @@ The repository is organized around four responsibilities:
 - **Validate perf-recovered features against SDE ground truth** (`run_spec5_sde_perf_similarity.py`, `analyze_sde_trace_uc.c`, `compare_mem_trace_metrics.py`)
 - **Run an analytical performance model on extracted features** (`run_miic_interval_backend.py`, `miic_interval_model.py`)
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current architecture and responsibility boundaries.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current architecture and
+[`docs/REFACTOR_PLAN.md`](docs/REFACTOR_PLAN.md) for the detailed migration plan.
 
 Downstream (optional):
 - **MIIC-inspired interval model backend** (`run_miic_interval_backend.py`) consumes the perf-only outputs.
@@ -52,7 +53,8 @@ Downstream (optional):
 - `trace_feature_api.py` **(public software-feature API — recommended for downstream)**
   - One importable call that turns a single `perf.data` into a software-feature dict/JSON:
     `extract_software_features(perf_data) -> dict`
-  - Wraps the full pipeline and hides the low-level parameter/path bookkeeping of `perf_pipeline.py`
+  - Delegates to `src/intel_pt_trace_processing/perf/processor.py`
+  - Wraps the full pipeline and hides the low-level parameter/path bookkeeping
   - Produces **software features only** (instruction-flow, data/instruction locality, optional
     instruction portrait); attaching hardware/microarchitecture parameters is left to the
     downstream consumer (e.g. ArchLens). See [Software-feature API](#software-feature-api-for-downstream) below.
@@ -189,6 +191,8 @@ features = extract_software_features(
 python3 trace_feature_api.py perf.data -o features.json
 # keep intermediate artifacts for debugging:
 python3 trace_feature_api.py perf.data -o features.json --work-dir outputs/_tmp_feat --keep-intermediate
+# optionally attach the initial interval-model prediction:
+python3 trace_feature_api.py perf.data -o features.json --theory-model
 ```
 
 The batch runners (`run_spec5_*`, `run_cloud_perf_trace_analysis.py`) continue to call the

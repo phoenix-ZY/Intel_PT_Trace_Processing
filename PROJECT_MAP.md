@@ -3,6 +3,7 @@
 The current main workflow is "Python orchestration + C core processing", and the perf-only post-processing logic is factored into a reusable module (`perf_pipeline.py`).
 
 For the full architecture and responsibility boundaries, see `docs/ARCHITECTURE.md`.
+For the detailed staged migration plan, see `docs/REFACTOR_PLAN.md`.
 
 At a high level the repository has four responsibilities:
 - **Trace collection**: produce `perf.data` (and SDE debugtrace when validation is needed).
@@ -79,10 +80,24 @@ Public API for downstream projects (recommended integration point):
     - `FeatureExtractionConfig`: tuning knobs; defaults mirror `add_perf_postprocess_args()`
   - Returns a `trace-profile-v1` dict: `data_locality`, `inst_locality`, `recover_report`,
     optional `insn_portrait`, and pipeline `health` counters.
+  - New normalized consumers should read `features.data_memory`,
+    `features.instruction_memory`, `features.instruction_portrait`, and
+    `features.recovery`.
   - **Scope boundary**: produces *software* features only. It deliberately does NOT attach any
     hardware/microarchitecture parameters — that step belongs to the downstream consumer
     (e.g. ArchLens). Trace collection (`perf record`) and SDE validation are out of scope.
   - Also runnable as a CLI: `python3 trace_feature_api.py perf.data -o features.json`.
+
+- `src/intel_pt_trace_processing/perf/processor.py`
+  - New one-shot perf processor used by `trace_feature_api.py`.
+  - Keeps the old pipeline underneath for now, but returns a unified profile shape.
+
+- `src/intel_pt_trace_processing/sde/processor.py`
+  - New SDE processor wrapper around `analyze_sde_trace_uc`.
+  - Defaults to data-memory features only, matching the validation use case.
+
+- `src/intel_pt_trace_processing/core/theory.py`
+  - Optional theory-model boundary and initial MIIC interval post-pass.
 
 - `trace_feature_processor.c` (experimental one-pass stream processor)
   - Input: `perf script --insn-trace` stream on stdin.
@@ -107,6 +122,10 @@ Public API for downstream projects (recommended integration point):
 
 - `export_perf_full_features.py` / `export_trace_features_to_excel.py`
   - Aggregates `report/*.analysis.json` into CSV/XLSX (quick analysis/plotting)
+
+- `src/intel_pt_trace_processing/tools/flatten.py`
+  - Generic `trace-profile-v1` flattener.
+  - Builds dynamic CSV columns from whatever the feature profile returns.
 
 - `plot_data_feature_similarity.py`
   - Compares/visualizes similarity or feature distributions (research/experiment scripts)

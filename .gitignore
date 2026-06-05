@@ -64,6 +64,8 @@ perf.data.*
 core
 core.*
 vgcore.*
+!src/intel_pt_trace_processing/core/
+!src/intel_pt_trace_processing/core/*.py
 
 # Local test files (not for distribution / version control)
 test/
