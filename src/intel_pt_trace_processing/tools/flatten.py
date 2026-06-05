@@ -136,19 +136,6 @@ def flatten_trace_profile(profile: dict[str, Any]) -> dict[str, Any]:
     if isinstance(portrait, dict):
         row.update(flatten_portrait(portrait))
 
-    theory = profile.get("theory")
-    if isinstance(theory, dict):
-        prediction = theory.get("prediction")
-        if isinstance(prediction, dict):
-            for key in ("cycles", "ipc", "cpi"):
-                value = prediction.get(key)
-                if isinstance(value, (int, float)):
-                    row[f"theory_{key}"] = float(value)
-            stack = prediction.get("stack")
-            if isinstance(stack, dict):
-                for key, value in stack.items():
-                    if isinstance(value, (int, float)):
-                        row[f"theory_stack_{key}"] = float(value)
     return row
 
 

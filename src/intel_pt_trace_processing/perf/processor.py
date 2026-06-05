@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from intel_pt_trace_processing.core.features import build_trace_profile
-from intel_pt_trace_processing.core.theory import TheoryConfig, predict_from_trace_profile
 from intel_pt_trace_processing.perf.stream import process_perf_stream
 
 
@@ -34,7 +33,6 @@ class PerfProcessingConfig:
     split_crossline: str = "on"
     rcx_soft_threshold: int = 128
 
-    theory: TheoryConfig = field(default_factory=TheoryConfig)
     verbose: bool = False
 
     def validate(self) -> None:
@@ -155,9 +153,6 @@ def process_perf_data(
             artifacts=artifacts,
             metadata=metadata,
         )
-        theory = predict_from_trace_profile(profile, cfg.theory)
-        if theory is not None:
-            profile["theory"] = theory
         return PerfProcessingResult(profile=profile, paths=artifacts)
     finally:
         if owns_work_dir and not keep_intermediate:

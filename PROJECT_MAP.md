@@ -4,17 +4,15 @@ The current main workflow is "Python orchestration + C one-pass processing", and
 
 For the full architecture and responsibility boundaries, see `docs/ARCHITECTURE.md`.
 
-At a high level the repository has four responsibilities:
+At a high level the repository has three current responsibilities:
 - **Trace collection**: produce `perf.data` (and SDE debugtrace when validation is needed).
 - **One-shot software feature extraction**: turn one `perf.data` into one final feature JSON.
 - **SDE validation**: compare perf-recovered locality features against true SDE memory accesses.
-- **Analytical performance modeling**: consume extracted software features plus hardware assumptions.
 
 Entry scripts (you will most likely start here):
 - **SPEC: SDE vs perf similarity**: `scripts/collect/run_spec5_sde_perf_similarity.py`
 - **SPEC: perf-only feature extraction**: `scripts/collect/run_spec5_perf_trace_analysis.py`
 - **Cloud: Docker collection + perf-only feature extraction**: `scripts/collect/run_cloud_perf_trace_analysis.py`
-- **Downstream model (optional)**: `scripts/model/run_miic_interval_backend.py`
 
 Public API for downstream projects (recommended integration point):
 - **Software-feature extraction API**: `trace_feature_api.py`
@@ -40,14 +38,6 @@ Public API for downstream projects (recommended integration point):
   - Runs typical cloud services and benchmark clients inside Docker
   - Collection: `perf record` (Intel PT) targeting a single thread (busiest TID)
   - Post-process: reuses `intel_pt_trace_processing.perf.stream.process_perf_stream`, producing analysis JSON in the same schema as SPEC perf-only
-
-- `scripts/model/run_miic_interval_backend.py`
-  - Walks an existing output directory (SPEC or cloud layout) and finds `report/*.perf.recovered.data.analysis.json`
-  - Loads data/inst locality features + optional portrait, runs an interval-style cycle-stack model, and exports CSV/JSON
-  - Model implementation: `src/intel_pt_trace_processing/model/miic_interval.py`
-  - This is the theoretical performance calculation layer. It consumes extracted software
-    features and attaches configurable hardware assumptions (cache sizes/latencies,
-    dispatch width, branch penalty, memory latency, MLP).
 
 - `csrc/analyze_sde_trace_uc.c`
   - Input: SDE debugtrace
@@ -101,9 +91,6 @@ Public API for downstream projects (recommended integration point):
   - New SDE processor wrapper around `analyze_sde_trace_uc`.
   - Defaults to data-memory features only, matching the validation use case.
 
-- `src/intel_pt_trace_processing/core/theory.py`
-  - Optional theory-model boundary and initial MIIC interval post-pass.
-
 - `csrc/trace_feature_core.h` / `csrc/trace_feature_core.c`
   - Shared feature/statistics core (RD/SDP/stride)
   - Used by both SDE and perf pipelines
@@ -113,7 +100,7 @@ Public API for downstream projects (recommended integration point):
   - Output: similarity metrics JSON (RD/SDP/stride, etc.)
 
 - `src/intel_pt_trace_processing/core/portrait_metrics.py`
-  - Flattens the instruction portrait JSON emitted by `trace_feature_processor` for CSV/model consumers.
+  - Flattens the instruction portrait JSON emitted by `trace_feature_processor` for CSV/export consumers.
 
 - `scripts/tools/export_perf_full_features.py` / `scripts/tools/export_trace_features_to_excel.py`
   - Aggregates `report/*.analysis.json` into CSV/XLSX (quick analysis/plotting)

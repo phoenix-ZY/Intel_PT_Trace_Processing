@@ -2,19 +2,15 @@
 
 This repo collects and post-processes **Intel PT** traces (via `perf`), recovers **memory accesses**
 from decoded instruction traces (via Unicorn), and produces **locality feature JSON reports**
-that can be compared across sources (SDE vs perf) or consumed by downstream models.
+that can be compared across sources (SDE vs perf) or consumed by downstream tools.
 
-The repository is organized around four responsibilities:
+The repository is organized around three current responsibilities:
 - **Collect raw traces** (`scripts/collect/run_spec5_perf_trace_analysis.py`, `scripts/collect/run_cloud_perf_trace_analysis.py`, `scripts/collect/run_spec5_sde_perf_similarity.py`)
 - **Extract one software-feature JSON from one `perf.data`** (`trace_feature_api.py`)
 - **Validate perf-recovered features against SDE ground truth** (`scripts/collect/run_spec5_sde_perf_similarity.py`, `csrc/analyze_sde_trace_uc.c`, `scripts/tools/compare_mem_trace_metrics.py`)
-- **Run an analytical performance model on extracted features** (`scripts/model/run_miic_interval_backend.py`, `src/intel_pt_trace_processing/model/miic_interval.py`)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current architecture and
 responsibility boundaries.
-
-Downstream (optional):
-- **MIIC-inspired interval model backend** (`scripts/model/run_miic_interval_backend.py`) consumes the perf-only outputs.
 
 ## Main scripts
 
@@ -131,21 +127,6 @@ Cloud layout:
   - `mem/`: `*.perf.mem.recovered.jsonl`
   - `report/`: `*.perf.*.analysis.json`, stderr/logs, optional portrait artifacts
 
-## MIIC interval model backend (optional)
-
-`scripts/model/run_miic_interval_backend.py` consumes existing analysis JSONs produced by the perf-only stream processor:
-- `*.perf.recovered.data.analysis.json`
-- `*.perf.inst.analysis.json` (if present)
-- `*.insn.portrait.json` (if present; enabled by default in perf processing)
-
-Example:
-
-```bash
-python3 scripts/model/run_miic_interval_backend.py \
-  --output-base outputs/cloud_trace \
-  --out-csv outputs/cloud_trace/miic_interval_predictions.csv
-```
-
 ## Software-feature API (for downstream)
 
 `trace_feature_api.py` is the **recommended integration point** for downstream projects
@@ -191,8 +172,6 @@ features = extract_software_features(
 python3 trace_feature_api.py perf.data -o features.json
 # keep intermediate artifacts for debugging:
 python3 trace_feature_api.py perf.data -o features.json --work-dir outputs/_tmp_feat --keep-intermediate
-# optionally attach the initial interval-model prediction:
-python3 trace_feature_api.py perf.data -o features.json --theory-model
 ```
 
 The batch runners under `scripts/collect/` call the lower-level

@@ -10,7 +10,7 @@ Main path:
     perf.data -> perf script --insn-trace -> instruction processing -> trace-profile-v1 JSON
 
 The API produces software features only. Hardware/microarchitecture parameters
-belong to downstream consumers or to the optional theory-model layer.
+belong to downstream consumers.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ _SRC_DIR = Path(__file__).resolve().parent / "src"
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
-from intel_pt_trace_processing.core.theory import TheoryConfig
 from intel_pt_trace_processing.perf.processor import PerfProcessingConfig, process_perf_data
 
 SCHEMA_VERSION = "trace-profile-v1"
@@ -52,7 +51,6 @@ def extract_software_features(
       - ``features.instruction_portrait``
       - ``features.recovery``
       - ``health``
-      - optional ``theory``
 
     Legacy top-level keys such as ``data_locality`` and ``inst_locality`` are
     still present for compatibility.
@@ -110,7 +108,6 @@ def _build_cli_config(args: Any) -> FeatureExtractionConfig:
         verbose=args.verbose,
         symfs_dir=args.symfs_dir,
         target_pid=args.target_pid,
-        theory=TheoryConfig(enabled=args.theory_model, access=args.theory_access),
     )
 
 
@@ -156,13 +153,6 @@ def main() -> int:
     parser.add_argument("--analysis-stride-bin-cap-lines", type=int, default=262144)
     parser.add_argument("--split-crossline", choices=["on", "off"], default="on")
     parser.add_argument("--rcx-soft-threshold", type=int, default=128)
-    parser.add_argument(
-        "--theory-model",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Attach an initial MIIC interval-model prediction to the output JSON",
-    )
-    parser.add_argument("--theory-access", type=str, default="all", help="per_access key used by theory model")
     parser.add_argument("--verbose", action="store_true")
 
     args = parser.parse_args()

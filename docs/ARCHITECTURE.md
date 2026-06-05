@@ -1,8 +1,9 @@
 # Architecture
 
-This repository has four main responsibilities. The first three are the trace
-processing pipeline; the fourth is an analytical performance-model backend that
-consumes the extracted features.
+This repository has three current responsibilities: trace collection, one-shot
+software feature extraction, and SDE validation. Analytical performance modeling
+is a future stream-time extension point rather than a post-pass over completed
+profiles.
 
 ## 1. Collect raw traces
 
@@ -64,8 +65,7 @@ The normalized profile shape is:
   },
   "health": {},
   "artifacts": {},
-  "metadata": {},
-  "theory": {}
+  "metadata": {}
 }
 ```
 
@@ -91,26 +91,24 @@ accesses from SDE?"
 This layer is validation/research infrastructure. It is not required when a
 downstream system only wants software features from a known `perf.data`.
 
-## 4. Predict performance from extracted software features
+## 4. Future Stream-Time Modeling
 
-This layer is separate from trace extraction. It consumes the feature JSONs and
-applies a configurable analytical model.
+The old post-pass analytical backend has been removed. Future theoretical
+calculation should be accumulated during the same per-instruction traversal that
+recovers memory and extracts XED portrait features.
 
-- `src/intel_pt_trace_processing/model/miic_interval.py`
-  - MIIC-inspired interval model.
-  - Uses data/instruction locality, instruction portrait, branch behavior, and
-    configurable microarchitecture parameters.
-- `src/intel_pt_trace_processing/core/theory.py`
-  - Optional model hook boundary.
-  - Provides an initial post-pass MIIC interval prediction for normalized profiles.
-- `scripts/model/run_miic_interval_backend.py`
-  - Batch runner over existing `report/*.perf.recovered.data.analysis.json` outputs.
+The intended direction is:
 
-Important boundary:
+```text
+perf script instruction stream
+  -> trace_feature_processor
+       -> recover memory/register state
+       -> extract instruction/locality/portrait features
+       -> accumulate theoretical model state per instruction
+  -> final profile JSON
+```
 
-- Trace extraction produces microarchitecture-independent software features.
-- The interval model attaches hardware assumptions such as cache sizes, latencies,
-  dispatch width, branch penalty, memory latency, and MLP.
+Until that exists, `trace-profile-v1` remains a software-feature artifact only.
 
 ## Support and experiment scripts
 
@@ -140,12 +138,4 @@ For validation:
 SDE debugtrace -> csrc/analyze_sde_trace_uc -> SDE truth features
 perf.data      -> trace_feature_api/stream processor -> recovered perf features
 both           -> scripts/tools/compare_mem_trace_metrics.py -> similarity report
-```
-
-For performance modeling:
-
-```text
-trace-profile / report JSONs
-  -> src/intel_pt_trace_processing/model/miic_interval.py
-  -> predicted CPI/IPC/cycle stack
 ```

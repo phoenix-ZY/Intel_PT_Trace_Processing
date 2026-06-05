@@ -54,7 +54,6 @@ def build_trace_profile(
     recover_report: dict[str, Any] | None = None,
     health: dict[str, Any] | None = None,
     artifacts: dict[str, str | Path | None] | None = None,
-    theory: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     include_legacy_keys: bool = True,
 ) -> dict[str, Any]:
@@ -82,8 +81,6 @@ def build_trace_profile(
         "artifacts": compact_artifacts(artifacts),
         "metadata": metadata or {},
     }
-    if theory is not None:
-        profile["theory"] = theory
 
     if include_legacy_keys:
         profile["source_perf_data"] = str(source_path) if source_kind == "perf" else None
