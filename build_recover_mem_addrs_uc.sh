@@ -7,9 +7,30 @@ CORE_SRC="${SCRIPT_DIR}/trace_feature_core.c"
 OUT="${SCRIPT_DIR}/recover_mem_addrs_uc"
 PROCESSOR_SRC="${SCRIPT_DIR}/trace_feature_processor.c"
 PROCESSOR_OUT="${SCRIPT_DIR}/trace_feature_processor"
-XED_PREFIX="${XED_PREFIX:-/flash/huangtianhao/xed/obj/wkit}"
 SDE_SRC="${SCRIPT_DIR}/analyze_sde_trace_uc.c"
 SDE_OUT="${SCRIPT_DIR}/analyze_sde_trace_uc"
+
+resolve_xed_prefix() {
+  if [[ -n "${XED_PREFIX:-}" ]]; then
+    printf '%s\n' "${XED_PREFIX}"
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "${HOME}/xed/obj/wkit" \
+    "/flash/huangtianhao/xed/obj/wkit" \
+    "/usr/local"; do
+    if [[ -f "${candidate}/include/xed/xed-interface.h" ]] && compgen -G "${candidate}/lib/libxed.*" >/dev/null; then
+      printf '%s\n' "${candidate}"
+      return
+    fi
+  done
+
+  printf '%s\n' "/flash/huangtianhao/xed/obj/wkit"
+}
+
+XED_PREFIX="$(resolve_xed_prefix)"
 
 build_trace_feature_processor_if_xed() {
   local unicorn_inc="$1"
@@ -139,6 +160,9 @@ fi
 
 try_build_with_python_unicorn python3
 try_build_with_python_unicorn python
+if [[ -x "/home/huangtianhao/anaconda3/envs/intel_PT/bin/python" ]]; then
+  try_build_with_python_unicorn /home/huangtianhao/anaconda3/envs/intel_PT/bin/python
+fi
 if [[ -x "/flash/huangtianhao/venv_py39/bin/python" ]]; then
   try_build_with_python_unicorn /flash/huangtianhao/venv_py39/bin/python
 fi
