@@ -2,6 +2,14 @@
 
 The current main workflow is "Python orchestration + C core processing", and the perf-only post-processing logic is factored into a reusable module (`perf_pipeline.py`).
 
+For the full architecture and responsibility boundaries, see `docs/ARCHITECTURE.md`.
+
+At a high level the repository has four responsibilities:
+- **Trace collection**: produce `perf.data` (and SDE debugtrace when validation is needed).
+- **One-shot software feature extraction**: turn one `perf.data` into one final feature JSON.
+- **SDE validation**: compare perf-recovered locality features against true SDE memory accesses.
+- **Analytical performance modeling**: consume extracted software features plus hardware assumptions.
+
 Entry scripts (you will most likely start here):
 - **SPEC: SDE vs perf similarity**: `run_spec5_sde_perf_similarity.py`
 - **SPEC: perf-only feature extraction**: `run_spec5_perf_trace_analysis.py`
@@ -37,6 +45,9 @@ Public API for downstream projects (recommended integration point):
   - Walks an existing output directory (SPEC or cloud layout) and finds `report/*.perf.recovered.data.analysis.json`
   - Loads data/inst locality features + optional portrait, runs an interval-style cycle-stack model, and exports CSV/JSON
   - Model implementation: `miic_interval_model.py`
+  - This is the theoretical performance calculation layer. It consumes extracted software
+    features and attaches configurable hardware assumptions (cache sizes/latencies,
+    dispatch width, branch penalty, memory latency, MLP).
 
 - `analyze_sde_trace_uc.c`
   - Input: SDE debugtrace
@@ -72,6 +83,15 @@ Public API for downstream projects (recommended integration point):
     hardware/microarchitecture parameters — that step belongs to the downstream consumer
     (e.g. ArchLens). Trace collection (`perf record`) and SDE validation are out of scope.
   - Also runnable as a CLI: `python3 trace_feature_api.py perf.data -o features.json`.
+
+- `trace_feature_processor.c` (experimental one-pass stream processor)
+  - Input: `perf script --insn-trace` stream on stdin.
+  - Output: one combined JSON containing `inst_locality`, `data_locality`, recover health,
+    and XED-based instruction portrait statistics.
+  - Depends on XED headers/libraries and is built by `build_recover_mem_addrs_uc.sh`
+    when a usable XED kit is available.
+  - This is a future faster path; the public Python API currently uses
+    `perf_pipeline.py + recover_mem_addrs_uc`.
 
 - `trace_feature_core.h` / `trace_feature_core.c`
   - Shared feature/statistics core (RD/SDP/stride)

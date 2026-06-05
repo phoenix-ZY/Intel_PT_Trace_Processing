@@ -4,10 +4,13 @@ This repo collects and post-processes **Intel PT** traces (via `perf`), recovers
 from decoded instruction traces (via Unicorn), and produces **locality feature JSON reports**
 that can be compared across sources (SDE vs perf) or consumed by downstream models.
 
-There are three practical entry points today:
-- **SPEC: SDE vs perf similarity** (`run_spec5_sde_perf_similarity.py`)
-- **SPEC: perf-only feature extraction** (`run_spec5_perf_trace_analysis.py`)
-- **Cloud apps (Docker): perf-only collection + feature extraction** (`run_cloud_perf_trace_analysis.py`)
+The repository is organized around four responsibilities:
+- **Collect raw traces** (`run_spec5_perf_trace_analysis.py`, `run_cloud_perf_trace_analysis.py`, `run_spec5_sde_perf_similarity.py`)
+- **Extract one software-feature JSON from one `perf.data`** (`trace_feature_api.py`)
+- **Validate perf-recovered features against SDE ground truth** (`run_spec5_sde_perf_similarity.py`, `analyze_sde_trace_uc.c`, `compare_mem_trace_metrics.py`)
+- **Run an analytical performance model on extracted features** (`run_miic_interval_backend.py`, `miic_interval_model.py`)
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current architecture and responsibility boundaries.
 
 Downstream (optional):
 - **MIIC-inspired interval model backend** (`run_miic_interval_backend.py`) consumes the perf-only outputs.
@@ -53,6 +56,12 @@ Downstream (optional):
   - Produces **software features only** (instruction-flow, data/instruction locality, optional
     instruction portrait); attaching hardware/microarchitecture parameters is left to the
     downstream consumer (e.g. ArchLens). See [Software-feature API](#software-feature-api-for-downstream) below.
+
+- `trace_feature_processor.c` **(experimental one-pass stream processor)**
+  - Reads `perf script --insn-trace` text from stdin and emits one combined feature JSON
+  - Uses XED directly for instruction portrait statistics
+  - Built by `build_recover_mem_addrs_uc.sh` when XED headers/libraries are available
+  - Not yet the default implementation behind `trace_feature_api.py`
 
 - `compare_mem_trace_metrics.py`  
   Compares two analysis JSON files:
