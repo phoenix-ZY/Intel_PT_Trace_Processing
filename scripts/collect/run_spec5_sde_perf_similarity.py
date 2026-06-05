@@ -16,6 +16,12 @@ from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_DIR = REPO_ROOT / "src"
+for _path in (REPO_ROOT, SRC_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
 import analyze_insn_trace_portrait as insn_portrait
 from perf_pipeline import perf_postprocess_one, run_step
 from perf_pipeline import add_perf_postprocess_args, validate_perf_postprocess_args
@@ -1603,7 +1609,7 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
         run_step(
             [
                 sys.executable,
-                str(script_dir / "compare_mem_trace_metrics.py"),
+                str(script_dir / "scripts/tools/compare_mem_trace_metrics.py"),
                 "--ref-analysis",
                 str(layout.sde_data_analysis_json),
                 "--test-analysis",
@@ -1622,7 +1628,7 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
         run_step(
             [
                 sys.executable,
-                str(script_dir / "compare_mem_trace_metrics.py"),
+                str(script_dir / "scripts/tools/compare_mem_trace_metrics.py"),
                 "--ref-analysis",
                 str(layout.sde_inst_analysis_json),
                 "--test-analysis",
@@ -1771,7 +1777,7 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
     if not benches:
         raise SystemExit("no benchmarks selected")
 
-    root = script_dir if script_dir is not None else Path(__file__).resolve().parent
+    root = script_dir if script_dir is not None else REPO_ROOT
     summary: list[RunCase] = []
     if use_stream:
         print(
@@ -2020,7 +2026,7 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
         print(f"  warmup pairwise csv:  {warmup_pair[1]}")
 
     if getattr(args, "export_full_features", True):
-        exporter = (Path(__file__).resolve().parent / "export_perf_full_features.py").resolve()
+        exporter = (root / "scripts/tools/export_perf_full_features.py").resolve()
         try:
             subprocess.run(
                 [sys.executable, str(exporter), "--output-base", str(args.output_base)],

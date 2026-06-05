@@ -50,7 +50,7 @@ def predict_from_trace_profile(profile: dict[str, Any], config: TheoryConfig) ->
 
     try:
         import analyze_insn_trace_portrait as insn_portrait  # type: ignore
-        from miic_interval_model import CpuSprLikeConfig, MiicInputs, predict_interval_cycles
+        from intel_pt_trace_processing.model.miic_interval import CpuSprLikeConfig, MiicInputs, predict_interval_cycles
     except Exception as exc:
         return {
             "schema": "trace-theory-v1",

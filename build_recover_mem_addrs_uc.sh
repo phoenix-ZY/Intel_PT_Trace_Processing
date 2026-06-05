@@ -2,12 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/recover_mem_addrs_uc.c"
-CORE_SRC="${SCRIPT_DIR}/trace_feature_core.c"
+C_SRC_DIR="${SCRIPT_DIR}/csrc"
+SRC="${C_SRC_DIR}/recover_mem_addrs_uc.c"
+CORE_SRC="${C_SRC_DIR}/trace_feature_core.c"
 OUT="${SCRIPT_DIR}/recover_mem_addrs_uc"
-PROCESSOR_SRC="${SCRIPT_DIR}/trace_feature_processor.c"
+PROCESSOR_SRC="${C_SRC_DIR}/trace_feature_processor.c"
 PROCESSOR_OUT="${SCRIPT_DIR}/trace_feature_processor"
-SDE_SRC="${SCRIPT_DIR}/analyze_sde_trace_uc.c"
+SDE_SRC="${C_SRC_DIR}/analyze_sde_trace_uc.c"
 SDE_OUT="${SCRIPT_DIR}/analyze_sde_trace_uc"
 
 resolve_xed_prefix() {
@@ -187,6 +188,6 @@ echo "  sudo apt-get update && sudo apt-get install -y libunicorn-dev pkg-config
 echo "Then:"
 echo "  bash build_recover_mem_addrs_uc.sh"
 echo "Try manually:"
-echo "  gcc -O3 -std=c11 -Wall -Wextra -I/path/to/unicorn/include recover_mem_addrs_uc.c trace_feature_core.c -L/path/to/lib -lunicorn -o recover_mem_addrs_uc"
-echo "  gcc -O3 -std=c11 -Wall -Wextra analyze_sde_trace_uc.c trace_feature_core.c -o analyze_sde_trace_uc"
+echo "  gcc -O3 -std=c11 -Wall -Wextra -I/path/to/unicorn/include csrc/recover_mem_addrs_uc.c csrc/trace_feature_core.c -L/path/to/lib -lunicorn -o recover_mem_addrs_uc"
+echo "  gcc -O3 -std=c11 -Wall -Wextra csrc/analyze_sde_trace_uc.c csrc/trace_feature_core.c -o analyze_sde_trace_uc"
 exit 2

@@ -12,10 +12,10 @@ At a high level the repository has four responsibilities:
 - **Analytical performance modeling**: consume extracted software features plus hardware assumptions.
 
 Entry scripts (you will most likely start here):
-- **SPEC: SDE vs perf similarity**: `run_spec5_sde_perf_similarity.py`
-- **SPEC: perf-only feature extraction**: `run_spec5_perf_trace_analysis.py`
-- **Cloud: Docker collection + perf-only feature extraction**: `run_cloud_perf_trace_analysis.py`
-- **Downstream model (optional)**: `run_miic_interval_backend.py`
+- **SPEC: SDE vs perf similarity**: `scripts/collect/run_spec5_sde_perf_similarity.py`
+- **SPEC: perf-only feature extraction**: `scripts/collect/run_spec5_perf_trace_analysis.py`
+- **Cloud: Docker collection + perf-only feature extraction**: `scripts/collect/run_cloud_perf_trace_analysis.py`
+- **Downstream model (optional)**: `scripts/model/run_miic_interval_backend.py`
 
 Public API for downstream projects (recommended integration point):
 - **Software-feature extraction API**: `trace_feature_api.py`
@@ -26,31 +26,31 @@ Public API for downstream projects (recommended integration point):
 
 ## 1) Workflows and responsibilities
 
-- `run_spec5_sde_perf_similarity.py`
+- `scripts/collect/run_spec5_sde_perf_similarity.py`
   - Batch runner for SPEC CPU 5xx with warmup sweeps
   - SDE path: calls `analyze_sde_trace_uc` (single pass emits SDE mem/insn + data/inst analysis)
   - perf path: calls `recover_mem_addrs_uc` (single pass recovers mem + emits data/inst analysis)
-  - Finally calls `compare_mem_trace_metrics.py` to produce similarity JSON and aggregates `summary.json/csv`
+  - Finally calls `scripts/tools/compare_mem_trace_metrics.py` to produce similarity JSON and aggregates `summary.json/csv`
 
-- `run_spec5_perf_trace_analysis.py`
+- `scripts/collect/run_spec5_perf_trace_analysis.py`
   - Batch runner for SPEC CPU 5xx with warmup sweeps, but **without SDE** and without similarity compare
   - Reuses `perf_pipeline.perf_postprocess_one` for the perf-only path
   - Useful for perf-only feature export / dataset generation / aligning SPEC and cloud outputs to the same schema
 
-- `run_cloud_perf_trace_analysis.py`
+- `scripts/collect/run_cloud_perf_trace_analysis.py`
   - Runs typical cloud services and benchmark clients inside Docker
   - Collection: `perf record` (Intel PT) targeting a single thread (busiest TID)
   - Post-process: reuses `perf_pipeline.perf_postprocess_one`, producing analysis JSON in the same schema as SPEC perf-only
 
-- `run_miic_interval_backend.py`
+- `scripts/model/run_miic_interval_backend.py`
   - Walks an existing output directory (SPEC or cloud layout) and finds `report/*.perf.recovered.data.analysis.json`
   - Loads data/inst locality features + optional portrait, runs an interval-style cycle-stack model, and exports CSV/JSON
-  - Model implementation: `miic_interval_model.py`
+  - Model implementation: `src/intel_pt_trace_processing/model/miic_interval.py`
   - This is the theoretical performance calculation layer. It consumes extracted software
     features and attaches configurable hardware assumptions (cache sizes/latencies,
     dispatch width, branch penalty, memory latency, MLP).
 
-- `analyze_sde_trace_uc.c`
+- `csrc/analyze_sde_trace_uc.c`
   - Input: SDE debugtrace
   - Outputs (optional combinations):
     - `*.sde.mem.real.jsonl`
@@ -58,7 +58,7 @@ Public API for downstream projects (recommended integration point):
     - `*.sde.data.analysis.json`
     - `*.sde.inst.analysis.json`
 
-- `recover_mem_addrs_uc.c`
+- `csrc/recover_mem_addrs_uc.c`
   - Input: perf instruction trace (`<tid> <time>: <ip> insn: <bytes...>`)
   - Outputs:
     - `*.perf.mem.recovered.jsonl`
@@ -99,7 +99,7 @@ Public API for downstream projects (recommended integration point):
 - `src/intel_pt_trace_processing/core/theory.py`
   - Optional theory-model boundary and initial MIIC interval post-pass.
 
-- `trace_feature_processor.c` (experimental one-pass stream processor)
+- `csrc/trace_feature_processor.c` (experimental one-pass stream processor)
   - Input: `perf script --insn-trace` stream on stdin.
   - Output: one combined JSON containing `inst_locality`, `data_locality`, recover health,
     and XED-based instruction portrait statistics.
@@ -108,11 +108,11 @@ Public API for downstream projects (recommended integration point):
   - This is a future faster path; the public Python API currently uses
     `perf_pipeline.py + recover_mem_addrs_uc`.
 
-- `trace_feature_core.h` / `trace_feature_core.c`
+- `csrc/trace_feature_core.h` / `csrc/trace_feature_core.c`
   - Shared feature/statistics core (RD/SDP/stride)
   - Used by both SDE and perf pipelines
 
-- `compare_mem_trace_metrics.py`
+- `scripts/tools/compare_mem_trace_metrics.py`
   - Input: two analysis JSON files (typically one from SDE, one from perf recovered)
   - Output: similarity metrics JSON (RD/SDP/stride, etc.)
 
@@ -120,14 +120,14 @@ Public API for downstream projects (recommended integration point):
   - Builds an "instruction portrait" (mix / branch stats / rates) and provides flatten helpers
   - Optional in perf-only pipeline (enabled by default) to produce `*.insn.portrait.json`
 
-- `export_perf_full_features.py` / `export_trace_features_to_excel.py`
+- `scripts/tools/export_perf_full_features.py` / `scripts/tools/export_trace_features_to_excel.py`
   - Aggregates `report/*.analysis.json` into CSV/XLSX (quick analysis/plotting)
 
 - `src/intel_pt_trace_processing/tools/flatten.py`
   - Generic `trace-profile-v1` flattener.
   - Builds dynamic CSV columns from whatever the feature profile returns.
 
-- `plot_data_feature_similarity.py`
+- `scripts/tools/plot_data_feature_similarity.py`
   - Compares/visualizes similarity or feature distributions (research/experiment scripts)
 
 ## 2) Common output layouts
@@ -171,7 +171,7 @@ Public API for downstream projects (recommended integration point):
 ```bash
 cd Intel_PT_Trace_Processing
 bash build_recover_mem_addrs_uc.sh
-python3 run_spec5_sde_perf_similarity.py --warmup-sweep 5,20
+python3 scripts/collect/run_spec5_sde_perf_similarity.py --warmup-sweep 5,20
 ```
 
 ## 4) Notes

@@ -18,10 +18,17 @@ src/intel_pt_trace_processing/
     ...                SPEC/cloud/SDE collection orchestration
   tools/
     ...                compare/export/plot helpers
+csrc/
+  ...                  C recovery/analyzer/stream-processor sources
+scripts/
+  collect/             SPEC/cloud/SDE trace collection entry points
+  model/               model runner CLIs
+  tools/               compare/export/plot CLIs
 ```
 
-The repository-root scripts remain as compatibility CLI entry points while this
-migration is in progress.
+The repository root keeps stable user-facing API/build files and compatibility
+modules only: `trace_feature_api.py`, `build_recover_mem_addrs_uc.sh`,
+`perf_pipeline.py`, and `analyze_insn_trace_portrait.py`.
 
 ## Core Perf Processing
 
@@ -47,7 +54,7 @@ Current implementation status:
   one-shot processor.
 - It currently delegates instruction traversal to the existing mature path:
   `perf_pipeline.py + recover_mem_addrs_uc`.
-- `trace_feature_processor.c` is the experimental future single-pass stream
+- `csrc/trace_feature_processor.c` is the experimental future single-pass stream
   processor that already combines recovery, locality, and XED portrait data.
 - `trace_feature_api.py` now delegates to the new processor package while keeping
   the public API stable.
@@ -90,7 +97,7 @@ SDE is a separate validation path:
 
 ```text
 SDE debugtrace
-  -> analyze_sde_trace_uc
+  -> csrc/analyze_sde_trace_uc
   -> true data-memory access stream
   -> same data-memory locality feature schema
 ```
@@ -122,7 +129,7 @@ or removing feature columns should not require editing each collector.
 
 Current implementation status:
 
-- Existing collection scripts still live at the repository root.
+- Collection scripts now live under `scripts/collect/`.
 - They already share `perf_pipeline.py`.
 - `src/intel_pt_trace_processing/tools/flatten.py` can flatten returned
   `trace-profile-v1` dictionaries and write dynamic-column CSVs.
@@ -166,4 +173,6 @@ Current implementation status:
 3. Route SDE through `src/intel_pt_trace_processing/sde`.
 4. Convert SPEC/cloud scripts into thin collection wrappers.
 5. Consolidate flatten/export logic so CSV columns come from returned profiles.
-6. Move compare/plot/export scripts under the tools namespace once imports are stable.
+6. Move the remaining compatibility modules (`perf_pipeline.py`,
+   `analyze_insn_trace_portrait.py`) into `src/` once all old scripts have been
+   routed through the new processors.

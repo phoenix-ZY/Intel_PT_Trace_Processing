@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS = ROOT / "outputs"
 CLOUD_CSV = OUTPUTS / "cloud_trace" / "perf_full_features.csv"
 SPEC_CSV = OUTPUTS / "spec5_perf_trace_only" / "perf_full_features.csv"
@@ -875,4 +875,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

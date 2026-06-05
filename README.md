@@ -5,50 +5,50 @@ from decoded instruction traces (via Unicorn), and produces **locality feature J
 that can be compared across sources (SDE vs perf) or consumed by downstream models.
 
 The repository is organized around four responsibilities:
-- **Collect raw traces** (`run_spec5_perf_trace_analysis.py`, `run_cloud_perf_trace_analysis.py`, `run_spec5_sde_perf_similarity.py`)
+- **Collect raw traces** (`scripts/collect/run_spec5_perf_trace_analysis.py`, `scripts/collect/run_cloud_perf_trace_analysis.py`, `scripts/collect/run_spec5_sde_perf_similarity.py`)
 - **Extract one software-feature JSON from one `perf.data`** (`trace_feature_api.py`)
-- **Validate perf-recovered features against SDE ground truth** (`run_spec5_sde_perf_similarity.py`, `analyze_sde_trace_uc.c`, `compare_mem_trace_metrics.py`)
-- **Run an analytical performance model on extracted features** (`run_miic_interval_backend.py`, `miic_interval_model.py`)
+- **Validate perf-recovered features against SDE ground truth** (`scripts/collect/run_spec5_sde_perf_similarity.py`, `csrc/analyze_sde_trace_uc.c`, `scripts/tools/compare_mem_trace_metrics.py`)
+- **Run an analytical performance model on extracted features** (`scripts/model/run_miic_interval_backend.py`, `src/intel_pt_trace_processing/model/miic_interval.py`)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current architecture and
 [`docs/REFACTOR_PLAN.md`](docs/REFACTOR_PLAN.md) for the detailed migration plan.
 
 Downstream (optional):
-- **MIIC-inspired interval model backend** (`run_miic_interval_backend.py`) consumes the perf-only outputs.
+- **MIIC-inspired interval model backend** (`scripts/model/run_miic_interval_backend.py`) consumes the perf-only outputs.
 
 ## Main scripts
 
-- `run_spec5_sde_perf_similarity.py`
+- `scripts/collect/run_spec5_sde_perf_similarity.py`
   - Batch runner for SPEC CPU 5xx with warmup sweeps
   - Produces two reference paths per case:
     - SDE debugtrace (real memory accesses)
     - perf Intel PT (recovered memory accesses from decoded instruction trace)
   - Outputs: per-case SDE/perf analysis JSON + similarity compare JSON + batch `summary.json`/`summary.csv`
 
-- `run_spec5_perf_trace_analysis.py`
+- `scripts/collect/run_spec5_perf_trace_analysis.py`
   - SPEC CPU 5xx **perf-only** (no SDE, no similarity compare)
   - Outputs: per-case recovered mem JSONL + `*.perf.*.analysis.json` + batch `summary.json`/`summary.csv`
 
-- `run_cloud_perf_trace_analysis.py`
+- `scripts/collect/run_cloud_perf_trace_analysis.py`
   - Runs classic cloud services and benchmark clients in Docker (redis/nginx/haproxy/postgres/mysql/memcached, etc.)
   - Captures perf Intel PT from a single worker thread, then reuses the same perf-only post-processing pipeline
   - Outputs: `intermediate/`, `mem/`, `report/` under each `<service>.<config>/`
 
-- `analyze_sde_trace_uc.c` + `build_recover_mem_addrs_uc.sh`  
+- `csrc/analyze_sde_trace_uc.c` + `build_recover_mem_addrs_uc.sh`
   One-pass SDE analyzer for debugtrace input. In a single scan, it can emit:
   - data mem JSONL (`*.sde.mem.real.jsonl`)
   - instruction trace (`*.sde.insn.trace.txt`)
   - SDE data analysis JSON
   - SDE instruction analysis JSON
 
-- `recover_mem_addrs_uc.c` + `build_recover_mem_addrs_uc.sh`  
+- `csrc/recover_mem_addrs_uc.c` + `build_recover_mem_addrs_uc.sh`
   Unicorn-based C recovery tool that reconstructs memory accesses from
   instruction trace (`<tid> <time>: <ip> insn: <bytes...>`). It now also
   supports one-pass analysis output (instruction + recovered-data profiles).
 
 - `perf_pipeline.py`
   - Reusable perf-only post-processing core: `perf.data → perf script → insn trace → recover_mem_addrs_uc → analysis JSON`
-  - Shared by `run_spec5_*` and `run_cloud_perf_trace_analysis.py`
+  - Shared by the collectors under `scripts/collect/`
 
 - `trace_feature_api.py` **(public software-feature API — recommended for downstream)**
   - One importable call that turns a single `perf.data` into a software-feature dict/JSON:
@@ -59,24 +59,24 @@ Downstream (optional):
     instruction portrait); attaching hardware/microarchitecture parameters is left to the
     downstream consumer (e.g. ArchLens). See [Software-feature API](#software-feature-api-for-downstream) below.
 
-- `trace_feature_processor.c` **(experimental one-pass stream processor)**
+- `csrc/trace_feature_processor.c` **(experimental one-pass stream processor)**
   - Reads `perf script --insn-trace` text from stdin and emits one combined feature JSON
   - Uses XED directly for instruction portrait statistics
   - Built by `build_recover_mem_addrs_uc.sh` when XED headers/libraries are available
   - Not yet the default implementation behind `trace_feature_api.py`
 
-- `compare_mem_trace_metrics.py`  
+- `scripts/tools/compare_mem_trace_metrics.py`
   Compares two analysis JSON files:
   - RD similarity (`r2`, `l1`, `topk_wmape`, cold-ratio diff)
   - SDP similarity (`r2`, `mean_abs_error`, `max_abs_error`)
   - Stride similarity (`r2`, `l1`, `jsd`)
 
-- `align_insn_traces.py`  
+- `scripts/tools/align_insn_traces.py`
   Unified instruction-trace alignment tool:
   - default: compute offset only (`offset = pt_idx - sde_idx`)
   - `--verify`: checkpoint-based same-segment validation
 
-- `analyze_insn_trace_with_xed.py`  
+- `scripts/tools/analyze_insn_trace_with_xed.py`
   Optional helper for sampled ISA/category statistics via `xed`.
 
 ## Typical usage
@@ -91,7 +91,7 @@ bash build_recover_mem_addrs_uc.sh
 ### 2) Run SPEC batch (SDE vs perf) comparison
 
 ```bash
-python3 run_spec5_sde_perf_similarity.py \
+python3 scripts/collect/run_spec5_sde_perf_similarity.py \
   --warmup-sweep 5,60,120 \
   --output-base outputs/spec5_sde_perf_subset
 ```
@@ -99,7 +99,7 @@ python3 run_spec5_sde_perf_similarity.py \
 ### 3) Run SPEC batch (perf-only)
 
 ```bash
-python3 run_spec5_perf_trace_analysis.py \
+python3 scripts/collect/run_spec5_perf_trace_analysis.py \
   --warmup-sweep 10,60 \
   --output-base outputs/spec5_perf_trace_only
 ```
@@ -109,7 +109,7 @@ python3 run_spec5_perf_trace_analysis.py \
 > This script drives Docker and perf and often requires root privileges (depending on your host and `perf_event_paranoid`).
 
 ```bash
-sudo python3 run_cloud_perf_trace_analysis.py \
+sudo python3 scripts/collect/run_cloud_perf_trace_analysis.py \
   --output-dir outputs/cloud_trace \
   --service redis \
   --samples-per-config 2
@@ -133,7 +133,7 @@ Cloud layout:
 
 ## MIIC interval model backend (optional)
 
-`run_miic_interval_backend.py` consumes existing analysis JSONs produced by the perf-only pipeline:
+`scripts/model/run_miic_interval_backend.py` consumes existing analysis JSONs produced by the perf-only pipeline:
 - `*.perf.recovered.data.analysis.json`
 - `*.perf.inst.analysis.json` (if present)
 - `*.insn.portrait.json` (if present; enabled by default in perf pipeline)
@@ -141,7 +141,7 @@ Cloud layout:
 Example:
 
 ```bash
-python3 run_miic_interval_backend.py \
+python3 scripts/model/run_miic_interval_backend.py \
   --output-base outputs/cloud_trace \
   --out-csv outputs/cloud_trace/miic_interval_predictions.csv
 ```
@@ -195,7 +195,7 @@ python3 trace_feature_api.py perf.data -o features.json --work-dir outputs/_tmp_
 python3 trace_feature_api.py perf.data -o features.json --theory-model
 ```
 
-The batch runners (`run_spec5_*`, `run_cloud_perf_trace_analysis.py`) continue to call the
+The batch runners under `scripts/collect/` continue to call the
 lower-level `perf_pipeline.perf_postprocess_one()` directly and are unaffected by this API.
 
 ## Standalone analysis usage
@@ -224,7 +224,7 @@ lower-level `perf_pipeline.perf_postprocess_one()` directly and are unaffected b
 ### Compare two analyzed traces
 
 ```bash
-python3 compare_mem_trace_metrics.py \
+python3 scripts/tools/compare_mem_trace_metrics.py \
   --ref-analysis ref.analysis.json \
   --test-analysis test.analysis.json \
   --json-out compare.json

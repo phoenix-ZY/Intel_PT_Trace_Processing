@@ -4,10 +4,21 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
-from miic_interval_model import CpuSprLikeConfig, build_miic_inputs, predict_interval_cycles
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_DIR = REPO_ROOT / "src"
+for _path in (REPO_ROOT, SRC_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from intel_pt_trace_processing.model.miic_interval import (
+    CpuSprLikeConfig,
+    build_miic_inputs,
+    predict_interval_cycles,
+)
 
 
 def iter_cases(output_base: Path) -> list[dict[str, Any]]:
@@ -192,4 +203,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

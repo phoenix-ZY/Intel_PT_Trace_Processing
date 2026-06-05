@@ -38,6 +38,12 @@ import time
 from pathlib import Path
 import shutil
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_DIR = REPO_ROOT / "src"
+for _path in (REPO_ROOT, SRC_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
 import analyze_insn_trace_portrait as insn_portrait
 
 from perf_pipeline import perf_postprocess_one
@@ -64,7 +70,7 @@ NETWORK_GATEWAY = "172.30.0.1"
 BENCH_CONTAINER = "bench-client"
 BENCH_IP = "172.30.0.20"
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = REPO_ROOT
 
 # ─── Service IP assignments ──────────────────────────────────────────────────
 
@@ -1650,7 +1656,7 @@ def main():
 
     print(f"\n🎉 All cloud benchmarks finished! Data saved to: {output_dir}")
     if args.export_full_features:
-        exporter = (SCRIPT_DIR / "export_perf_full_features.py").resolve()
+        exporter = (SCRIPT_DIR / "scripts/tools/export_perf_full_features.py").resolve()
         try:
             subprocess.run(
                 [sys.executable, str(exporter), "--output-base", str(output_dir)],

@@ -8,6 +8,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import analyze_insn_trace_portrait as insn_portrait
 from export_trace_features_to_excel import write_csv, write_xlsx
 
@@ -659,4 +663,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

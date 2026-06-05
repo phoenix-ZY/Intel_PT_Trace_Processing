@@ -209,7 +209,7 @@ def main() -> int:
     ap.add_argument(
         "--output-base",
         type=Path,
-        default=Path("/home/huangtianhao/Intel_PT_Trace_Processing/outputs/spec5_sde_perf_subset"),
+        default=Path(__file__).resolve().parents[2] / "outputs/spec5_sde_perf_subset",
         help="outputs directory containing <bench>/<warmup>/report/*.features.bundle.json",
     )
     ap.add_argument(
@@ -268,4 +268,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
