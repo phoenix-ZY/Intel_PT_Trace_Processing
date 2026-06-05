@@ -72,9 +72,13 @@ recover_mem_addrs_uc
 
 analyze_sde_trace_uc
 
+trace_feature_processor
+
 www
 
 certs
 *.txt
 
 paper
+# 运行日志，无需提交
+*.log

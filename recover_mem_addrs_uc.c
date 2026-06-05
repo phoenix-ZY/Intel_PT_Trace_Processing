@@ -53,7 +53,10 @@ typedef struct {
     uint64_t mvs_limit_lines;
     uint64_t mvs_padding;
     uint64_t mvs_cursor;
-    U64Map mvs_pc_scope;   // pc -> 0 normal, 1 indirect-like
+    U64Map mvs_pc_scope;   // pc -> MvsSeedScope
+    U64Map mvs_pc_base;    // pc -> synthetic region base
+    U64Map mvs_pc_cursor;  // pc -> next byte offset within region
+    U64Map mvs_pc_step;    // pc -> stream step in bytes
     U64Set mvs_seeded_qw;  // seeded 8-byte slots
     uint64_t mvs_seeded_total;
     uint64_t mvs_seeded_indirect;
@@ -113,6 +116,14 @@ enum {
     PAGE_INIT_RANDOM = 1,
     PAGE_INIT_STABLE = 2,
 };
+
+typedef enum {
+    MVS_SCOPE_NORMAL = 0,
+    MVS_SCOPE_POINTER = 1,
+    MVS_SCOPE_STACK = 2,
+    MVS_SCOPE_GLOBAL = 3,
+    MVS_SCOPE_ARRAY = 4,
+} MvsSeedScope;
 
 typedef struct {
     uint64_t insn_idx;
@@ -203,13 +214,14 @@ static void emit_mem_event(Ctx *ctx, const char *kind, uint64_t address, int siz
     fprintf(
         ctx->out,
         salvaged
-            ? "{\"access\":\"%s\",\"addr\":\"0x%" PRIx64 "\",\"size\":%d,\"tid\":%u,\"ginsn\":%" PRIu64 ",\"salvaged\":true}\n"
-            : "{\"access\":\"%s\",\"addr\":\"0x%" PRIx64 "\",\"size\":%d,\"tid\":%u,\"ginsn\":%" PRIu64 "}\n",
+            ? "{\"access\":\"%s\",\"addr\":\"0x%" PRIx64 "\",\"size\":%d,\"tid\":%u,\"ginsn\":%" PRIu64 ",\"ip\":\"0x%" PRIx64 "\",\"salvaged\":true}\n"
+            : "{\"access\":\"%s\",\"addr\":\"0x%" PRIx64 "\",\"size\":%d,\"tid\":%u,\"ginsn\":%" PRIu64 ",\"ip\":\"0x%" PRIx64 "\"}\n",
         kind,
         address,
         size,
         ctx->cur_tid,
-        ctx->cur_insn_idx
+        ctx->cur_insn_idx,
+        ctx->cur_ip
     );
 }
 
@@ -696,50 +708,199 @@ static void apply_rcx_soft_threshold(Ctx *ctx, uint64_t threshold, const TraceIn
     ctx->rcx_soft_adjusted++;
 }
 
-static bool looks_like_indirect_load(const TraceInsn *insn, int access_size) {
-    if (!insn || insn->code_len == 0 || access_size < 8) return false;
-    size_t i = 0;
-    while (i < insn->code_len) {
-        uint8_t b = insn->code[i];
-        if (b == 0x66 || b == 0x67 || b == 0xF0 || b == 0xF2 || b == 0xF3) {
-            i++;
+static bool parse_memory_operand_shape(
+    const TraceInsn *insn,
+    bool *has_index,
+    bool *uses_stack_base,
+    bool *is_rip_relative,
+    int *scale_out
+) {
+    if (!insn || insn->code_len == 0) return false;
+
+    size_t pos = 0;
+    int rex_b_ext = 0;
+    int rex_x_ext = 0;
+    while (pos < insn->code_len) {
+        uint8_t byte = insn->code[pos];
+        if (byte == 0x66 || byte == 0x67 || byte == 0xF0 || byte == 0xF2 || byte == 0xF3) {
+            pos++;
             continue;
         }
-        if ((b & 0xF0) == 0x40) { // REX
-            i++;
+        if ((byte & 0xF0) == 0x40) {
+            rex_b_ext = byte & 0x1;
+            rex_x_ext = (byte >> 1) & 0x1;
+            pos++;
             continue;
         }
         break;
     }
-    if (i >= insn->code_len) return false;
-    uint8_t op = insn->code[i];
-    // Common pointer-load forms: mov r64, [mem] and mov r64, moffs64.
-    return (op == 0x8B || op == 0xA1);
+    if (pos >= insn->code_len) return false;
+
+    uint8_t opcode = insn->code[pos++];
+    if (opcode == 0x0F) {
+        if (pos >= insn->code_len) return false;
+        opcode = insn->code[pos++];
+        (void)opcode;
+    } else if (opcode == 0xA0 || opcode == 0xA1 || opcode == 0xA2 || opcode == 0xA3) {
+        *is_rip_relative = false;
+        *uses_stack_base = false;
+        *has_index = false;
+        *scale_out = 1;
+        return true;
+    }
+
+    if (pos >= insn->code_len) return false;
+    uint8_t modrm = insn->code[pos++];
+    int mod = (modrm >> 6) & 0x3;
+    int rm_low = modrm & 0x7;
+    if (mod == 3) return false;
+
+    *has_index = false;
+    *uses_stack_base = false;
+    *is_rip_relative = false;
+    *scale_out = 1;
+
+    if (rm_low == 4) {
+        if (pos >= insn->code_len) return false;
+        uint8_t sib = insn->code[pos++];
+        int sib_scale = (sib >> 6) & 0x3;
+        int index_low = (sib >> 3) & 0x7;
+        int base_low = sib & 0x7;
+        int index_reg = index_low | (rex_x_ext << 3);
+        int base_reg = base_low | (rex_b_ext << 3);
+        *scale_out = 1 << sib_scale;
+        *has_index = index_low != 4;
+        if (index_reg == 4) *has_index = false;
+        if (base_reg == 4 || base_reg == 5) *uses_stack_base = true;
+        if (mod == 0 && base_low == 5) *uses_stack_base = false;
+    } else {
+        int base_reg = rm_low | (rex_b_ext << 3);
+        if (mod == 0 && rm_low == 5) {
+            *is_rip_relative = true;
+        } else if (base_reg == 4 || base_reg == 5) {
+            *uses_stack_base = true;
+        }
+    }
+
+    return true;
+}
+
+static MvsSeedScope classify_mvs_seed_scope(const TraceInsn *insn, int access_size) {
+    bool has_index = false;
+    bool uses_stack_base = false;
+    bool is_rip_relative = false;
+    int scale = 1;
+    bool has_memory_shape = parse_memory_operand_shape(
+        insn,
+        &has_index,
+        &uses_stack_base,
+        &is_rip_relative,
+        &scale
+    );
+    if (uses_stack_base) return MVS_SCOPE_STACK;
+    if (is_rip_relative) return MVS_SCOPE_GLOBAL;
+    if (has_index) return MVS_SCOPE_ARRAY;
+
+    if (!insn || insn->code_len == 0 || access_size < 8) return MVS_SCOPE_NORMAL;
+    size_t pos = 0;
+    while (pos < insn->code_len) {
+        uint8_t byte = insn->code[pos];
+        if (byte == 0x66 || byte == 0x67 || byte == 0xF0 || byte == 0xF2 || byte == 0xF3) {
+            pos++;
+            continue;
+        }
+        if ((byte & 0xF0) == 0x40) {
+            pos++;
+            continue;
+        }
+        break;
+    }
+    if (pos >= insn->code_len) return has_memory_shape ? MVS_SCOPE_POINTER : MVS_SCOPE_NORMAL;
+    uint8_t opcode = insn->code[pos];
+    if (opcode == 0x8B || opcode == 0xA1) return MVS_SCOPE_POINTER;
+    return has_memory_shape ? MVS_SCOPE_POINTER : MVS_SCOPE_NORMAL;
+}
+
+static uint64_t scope_region_offset(MvsSeedScope scope) {
+    switch (scope) {
+        case MVS_SCOPE_POINTER: return 0x000000000000ULL;
+        case MVS_SCOPE_STACK: return 0x010000000000ULL;
+        case MVS_SCOPE_GLOBAL: return 0x020000000000ULL;
+        case MVS_SCOPE_ARRAY: return 0x030000000000ULL;
+        case MVS_SCOPE_NORMAL:
+        default: return 0x1000000000ULL;
+    }
+}
+
+static uint64_t choose_mvs_step(Ctx *ctx, MvsSeedScope scope, int access_size) {
+    uint64_t default_padding = ctx->mvs_padding ? ctx->mvs_padding : 64;
+    uint64_t access_width = access_size > 0 ? align_up((uint64_t)access_size, 8) : 8;
+    switch (scope) {
+        case MVS_SCOPE_STACK:
+            return 0;
+        case MVS_SCOPE_GLOBAL:
+            return 0;
+        case MVS_SCOPE_ARRAY:
+            return access_width > default_padding ? access_width : default_padding;
+        case MVS_SCOPE_POINTER:
+            return default_padding;
+        case MVS_SCOPE_NORMAL:
+        default:
+            return 0;
+    }
 }
 
 static uint64_t mvs_seed_value(Ctx *ctx, uint64_t pc, uint64_t addr, int size) {
     if (!ctx || !ctx->mvs_enable) return 0;
-    uint64_t scope = 0;
-    if (!map_get(&ctx->mvs_pc_scope, pc, &scope)) {
-        scope = looks_like_indirect_load(ctx->cur_insn, size) ? 1ULL : 0ULL;
-        map_put(&ctx->mvs_pc_scope, pc, scope);
+
+    uint64_t scope_value = 0;
+    if (!map_get(&ctx->mvs_pc_scope, pc, &scope_value)) {
+        scope_value = (uint64_t)classify_mvs_seed_scope(ctx->cur_insn, size);
+        map_put(&ctx->mvs_pc_scope, pc, scope_value);
     }
-    if (scope) {
-        uint64_t lines = ctx->mvs_limit_lines ? ctx->mvs_limit_lines : (1ULL << 20);
-        uint64_t window_bytes = lines << 6;
-        uint64_t disp_hint = addr & 0x38ULL; // keep 8-byte alignment
-        uint64_t line_off = window_bytes ? (ctx->mvs_cursor % window_bytes) : 0;
-        uint64_t v = ctx->mvs_bound + line_off + disp_hint;
-        uint64_t step = (ctx->mvs_padding ? ctx->mvs_padding : 64) + 64;
-        if (window_bytes) ctx->mvs_cursor = (ctx->mvs_cursor + step) % window_bytes;
-        else ctx->mvs_cursor += step;
-        ctx->mvs_seeded_indirect++;
+    MvsSeedScope scope = (MvsSeedScope)scope_value;
+    uint64_t lines = ctx->mvs_limit_lines ? ctx->mvs_limit_lines : (1ULL << 20);
+    uint64_t window_bytes = lines << 6;
+
+    if (scope == MVS_SCOPE_NORMAL) {
+        uint64_t normal_base = ctx->mvs_bound + scope_region_offset(scope);
+        uint64_t v = normal_base + ((rng_next_u64(&ctx->rng_state) % lines) << 6) + (addr & 0x38ULL);
+        ctx->mvs_seeded_normal++;
         return v;
     }
-    uint64_t lines = ctx->mvs_limit_lines ? ctx->mvs_limit_lines : (1ULL << 20);
-    uint64_t normal_base = ctx->mvs_bound + 0x1000000000ULL;
-    uint64_t v = normal_base + ((rng_next_u64(&ctx->rng_state) % lines) << 6);
-    ctx->mvs_seeded_normal++;
+
+    uint64_t pc_base = 0;
+    if (!map_get(&ctx->mvs_pc_base, pc, &pc_base)) {
+        uint64_t region_base = ctx->mvs_bound + scope_region_offset(scope);
+        uint64_t region_lines = lines ? lines : (1ULL << 20);
+        uint64_t pc_hash = mix64(pc ^ ((uint64_t)scope << 56));
+        uint64_t pc_line = pc_hash % region_lines;
+        pc_base = region_base + (pc_line << 6);
+        map_put(&ctx->mvs_pc_base, pc, pc_base);
+    }
+
+    uint64_t cursor = 0;
+    if (!map_get(&ctx->mvs_pc_cursor, pc, &cursor)) {
+        cursor = mix64(pc ^ addr ^ 0x6d76735f637572ULL) & 0x3F8ULL;
+    }
+
+    uint64_t step = 0;
+    if (!map_get(&ctx->mvs_pc_step, pc, &step)) {
+        step = choose_mvs_step(ctx, scope, size);
+        if (scope == MVS_SCOPE_ARRAY && step < 8) step = 8;
+        map_put(&ctx->mvs_pc_step, pc, step);
+    }
+
+    uint64_t disp_hint = addr & 0x38ULL;
+    uint64_t line_off = window_bytes ? (cursor % window_bytes) : cursor;
+    uint64_t v = pc_base + line_off + disp_hint;
+
+    if (window_bytes) cursor = (cursor + step) % window_bytes;
+    else cursor += step;
+    map_put(&ctx->mvs_pc_cursor, pc, cursor);
+
+    if (scope == MVS_SCOPE_POINTER || scope == MVS_SCOPE_ARRAY) ctx->mvs_seeded_indirect++;
+    else ctx->mvs_seeded_normal++;
     return v;
 }
 
@@ -1120,6 +1281,9 @@ int main(int argc, char **argv) {
         .data_profile = NULL,
     };
     map_init(&ctx.mvs_pc_scope, 1 << 12);
+    map_init(&ctx.mvs_pc_base, 1 << 12);
+    map_init(&ctx.mvs_pc_cursor, 1 << 12);
+    map_init(&ctx.mvs_pc_step, 1 << 12);
     set_init(&ctx.mvs_seeded_qw, 1 << 14);
     map_init(&ctx.syscall_hist, 1 << 10);
     TfProfile *inst_profile = NULL;
@@ -1458,6 +1622,9 @@ int main(int argc, char **argv) {
     map_free(&ipmap);
     set_free(&pages);
     map_free(&ctx.mvs_pc_scope);
+    map_free(&ctx.mvs_pc_base);
+    map_free(&ctx.mvs_pc_cursor);
+    map_free(&ctx.mvs_pc_step);
     map_free(&ctx.syscall_hist);
     set_free(&ctx.mvs_seeded_qw);
     free(invalid_samples);

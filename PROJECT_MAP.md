@@ -8,6 +8,13 @@ Entry scripts (you will most likely start here):
 - **Cloud: Docker collection + perf-only feature extraction**: `run_cloud_perf_trace_analysis.py`
 - **Downstream model (optional)**: `run_miic_interval_backend.py`
 
+Public API for downstream projects (recommended integration point):
+- **Software-feature extraction API**: `trace_feature_api.py`
+  - Single importable function `extract_software_features(perf_data) -> dict` that wraps the
+    whole `perf.data → software features` pipeline.
+  - Intended for downstream consumers (e.g. ArchLens) that only need the *software* features
+    and want to attach their own hardware/microarchitecture parameters afterwards.
+
 ## 1) Workflows and responsibilities
 
 - `run_spec5_sde_perf_similarity.py`
@@ -51,6 +58,20 @@ Entry scripts (you will most likely start here):
   - Key functions:
     - `add_perf_postprocess_args()` / `validate_perf_postprocess_args()`
     - `perf_postprocess_one()`: returns aux_lost / trace_errors / insn_lines and all output paths
+  - This is the low-level layer; the batch runners call it directly. New downstream
+    integrations should prefer `trace_feature_api.py` (below) instead.
+
+- `trace_feature_api.py` (public software-feature API)
+  - Stable, importable entry point that wraps `perf_postprocess_one()` into a single call:
+    - `extract_software_features(perf_data, *, config=None, work_dir=None, ...) -> dict`
+    - `extract_software_features_to_json(perf_data, output_json, ...) -> Path`
+    - `FeatureExtractionConfig`: tuning knobs; defaults mirror `add_perf_postprocess_args()`
+  - Returns a `trace-profile-v1` dict: `data_locality`, `inst_locality`, `recover_report`,
+    optional `insn_portrait`, and pipeline `health` counters.
+  - **Scope boundary**: produces *software* features only. It deliberately does NOT attach any
+    hardware/microarchitecture parameters — that step belongs to the downstream consumer
+    (e.g. ArchLens). Trace collection (`perf record`) and SDE validation are out of scope.
+  - Also runnable as a CLI: `python3 trace_feature_api.py perf.data -o features.json`.
 
 - `trace_feature_core.h` / `trace_feature_core.c`
   - Shared feature/statistics core (RD/SDP/stride)

@@ -151,6 +151,8 @@ def perf_postprocess_one(
     recover_salvage_reads: bool,
     insn_portrait: bool,
     verbose: bool,
+    symfs_dir: str | Path | None = None,
+    target_pid: str | None = None,
 ) -> tuple[int, int, int, Path, Path, Path, Path, Path | None]:
     """
     Common perf-only post-processing:
@@ -165,6 +167,19 @@ def perf_postprocess_one(
     recover_bin = script_dir / "recover_mem_addrs_uc"
     if not recover_bin.exists():
         raise RuntimeError(f"missing {recover_bin}; run build_recover_mem_addrs_uc.sh first")
+
+    # Optional binary-resolution args for off-host / production perf.data decoding.
+    # --symfs points perf at a captured binary root (instead of the local disk);
+    # --pid restricts decoding to one process. Both default to off so existing
+    # callers (same-host capture) keep identical behavior.
+    perf_locate_args: list[str] = []
+    if symfs_dir is not None:
+        symfs_path = Path(symfs_dir)
+        if not symfs_path.is_dir():
+            raise RuntimeError(f"symfs_dir is not a directory: {symfs_path}")
+        perf_locate_args += ["--symfs", str(symfs_path)]
+    if target_pid:
+        perf_locate_args += ["--pid", str(target_pid)]
 
     intermediate_dir.mkdir(parents=True, exist_ok=True)
     mem_dir.mkdir(parents=True, exist_ok=True)
@@ -271,6 +286,7 @@ def perf_postprocess_one(
                     str(perf_tool),
                     "script",
                     "-f",
+                    *perf_locate_args,
                     "--insn-trace",
                     "-F",
                     "tid,time,ip,insn",
@@ -289,6 +305,7 @@ def perf_postprocess_one(
                     str(perf_tool),
                     "script",
                     "-f",
+                    *perf_locate_args,
                     "--insn-trace",
                     "-F",
                     "tid,time,ip,insn",
@@ -318,6 +335,7 @@ def perf_postprocess_one(
                         str(perf_tool),
                         "script",
                         "-f",
+                        *perf_locate_args,
                         "--insn-trace",
                         "--xed",
                         "-F",
@@ -336,6 +354,7 @@ def perf_postprocess_one(
                         str(perf_tool),
                         "script",
                         "-f",
+                        *perf_locate_args,
                         "--insn-trace",
                         "--xed",
                         "-F",

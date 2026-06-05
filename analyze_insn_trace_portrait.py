@@ -28,7 +28,7 @@ LINE_VERBOSE = re.compile(
     re.DOTALL,
 )
 IPC_SUFFIX = re.compile(
-    r"(.+?)\s+IPC:\s*([0-9.]+)(?:\s*\((\d+)/(\d+)\))?\s*$",
+    r"(.+?)\s+IPC:\s*(?:([0-9.]+)\s*)?(?:\((\d+)/(\d+)\))?\s*$",
     re.DOTALL,
 )
 
@@ -616,7 +616,7 @@ def analyze_lines(
             ipc_lines += 1
             if ipc_val is not None:
                 ipc_values.append(ipc_val)
-            if ipc_n is not None and ipc_d is not None and ipc_d > 0:
+            if ipc_n is not None and ipc_d is not None:
                 ipc_retire_nums.append(ipc_n)
                 ipc_retire_dens.append(ipc_d)
 

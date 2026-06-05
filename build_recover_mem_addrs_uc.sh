@@ -5,8 +5,36 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SCRIPT_DIR}/recover_mem_addrs_uc.c"
 CORE_SRC="${SCRIPT_DIR}/trace_feature_core.c"
 OUT="${SCRIPT_DIR}/recover_mem_addrs_uc"
+PROCESSOR_SRC="${SCRIPT_DIR}/trace_feature_processor.c"
+PROCESSOR_OUT="${SCRIPT_DIR}/trace_feature_processor"
+XED_PREFIX="${XED_PREFIX:-/flash/huangtianhao/xed/obj/wkit}"
 SDE_SRC="${SCRIPT_DIR}/analyze_sde_trace_uc.c"
 SDE_OUT="${SCRIPT_DIR}/analyze_sde_trace_uc"
+
+build_trace_feature_processor_if_xed() {
+  local unicorn_inc="$1"
+  shift
+
+  if [[ ! -f "${XED_PREFIX}/include/xed/xed-interface.h" ]]; then
+    echo "[build] skip ${PROCESSOR_OUT}: missing XED headers under ${XED_PREFIX} (set XED_PREFIX to build it)" >&2
+    return 0
+  fi
+  if ! compgen -G "${XED_PREFIX}/lib/libxed.*" >/dev/null; then
+    echo "[build] skip ${PROCESSOR_OUT}: missing libxed under ${XED_PREFIX}/lib (set XED_PREFIX to build it)" >&2
+    return 0
+  fi
+
+  local inc_args=()
+  if [[ -n "${unicorn_inc}" ]]; then
+    inc_args+=("-I${unicorn_inc}")
+  fi
+
+  gcc -O3 -march=native -std=c11 -Wall -Wextra \
+    "${inc_args[@]}" -I"${XED_PREFIX}/include" "${PROCESSOR_SRC}" "${CORE_SRC}" -o "${PROCESSOR_OUT}" \
+    "$@" \
+    -L"${XED_PREFIX}/lib" -Wl,-rpath,"${XED_PREFIX}/lib" -lxed -pthread -lm
+  echo "[build] done: ${PROCESSOR_OUT}"
+}
 
 try_build_with_python_unicorn() {
   local py="${1:-python3}"
@@ -54,6 +82,9 @@ PY
       gcc -O3 -march=native -std=c11 -Wall -Wextra \
         -I"${inc}" "${SRC}" "${CORE_SRC}" -o "${OUT}" \
         -L"${lib_dir}" -Wl,-rpath,"${lib_dir}" ${unicorn_link} -pthread -lm
+      build_trace_feature_processor_if_xed \
+        "${inc}" \
+        -L"${lib_dir}" -Wl,-rpath,"${lib_dir}" ${unicorn_link}
       gcc -O3 -march=native -std=c11 -Wall -Wextra \
         "${SDE_SRC}" "${CORE_SRC}" -o "${SDE_OUT}" -lm
       echo "[build] done: ${OUT}"
@@ -82,6 +113,9 @@ try_build_with_prefix() {
       gcc -O3 -march=native -std=c11 -Wall -Wextra \
         -I"${inc}" "${SRC}" "${CORE_SRC}" -o "${OUT}" \
         -L"${lib}" -Wl,-rpath,"${lib}" ${unicorn_link} -pthread -lm
+      build_trace_feature_processor_if_xed \
+        "${inc}" \
+        -L"${lib}" -Wl,-rpath,"${lib}" ${unicorn_link}
       gcc -O3 -march=native -std=c11 -Wall -Wextra \
         "${SDE_SRC}" "${CORE_SRC}" -o "${SDE_OUT}" -lm
       echo "[build] done: ${OUT}"
@@ -95,6 +129,7 @@ if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists unicorn; then
   echo "[build] using pkg-config unicorn"
   gcc -O3 -march=native -std=c11 -Wall -Wextra \
     "${SRC}" "${CORE_SRC}" -o "${OUT}" $(pkg-config --cflags --libs unicorn) -lm
+  build_trace_feature_processor_if_xed "" $(pkg-config --cflags --libs unicorn)
   gcc -O3 -march=native -std=c11 -Wall -Wextra \
     "${SDE_SRC}" "${CORE_SRC}" -o "${SDE_OUT}" -lm
   echo "[build] done: ${OUT}"
@@ -104,6 +139,9 @@ fi
 
 try_build_with_python_unicorn python3
 try_build_with_python_unicorn python
+if [[ -x "/flash/huangtianhao/venv_py39/bin/python" ]]; then
+  try_build_with_python_unicorn /flash/huangtianhao/venv_py39/bin/python
+fi
 
 if [[ -n "${UNICORN_PREFIX:-}" ]]; then
   try_build_with_prefix "${UNICORN_PREFIX}"

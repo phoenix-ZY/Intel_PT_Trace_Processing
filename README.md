@@ -46,6 +46,14 @@ Downstream (optional):
   - Reusable perf-only post-processing core: `perf.data → perf script → insn trace → recover_mem_addrs_uc → analysis JSON`
   - Shared by `run_spec5_*` and `run_cloud_perf_trace_analysis.py`
 
+- `trace_feature_api.py` **(public software-feature API — recommended for downstream)**
+  - One importable call that turns a single `perf.data` into a software-feature dict/JSON:
+    `extract_software_features(perf_data) -> dict`
+  - Wraps the full pipeline and hides the low-level parameter/path bookkeeping of `perf_pipeline.py`
+  - Produces **software features only** (instruction-flow, data/instruction locality, optional
+    instruction portrait); attaching hardware/microarchitecture parameters is left to the
+    downstream consumer (e.g. ArchLens). See [Software-feature API](#software-feature-api-for-downstream) below.
+
 - `compare_mem_trace_metrics.py`  
   Compares two analysis JSON files:
   - RD similarity (`r2`, `l1`, `topk_wmape`, cold-ratio diff)
@@ -126,6 +134,56 @@ python3 run_miic_interval_backend.py \
   --output-base outputs/cloud_trace \
   --out-csv outputs/cloud_trace/miic_interval_predictions.csv
 ```
+
+## Software-feature API (for downstream)
+
+`trace_feature_api.py` is the **recommended integration point** for downstream projects
+(e.g. ArchLens). It abstracts the whole `perf.data → software features` pipeline behind a
+single importable function, so callers do not need to manage intermediate files, the many
+recover/analysis knobs, or the output directory layout.
+
+**Scope / responsibility boundary**
+
+- Input: a single raw Intel PT capture (`perf.data`).
+- Output: a `trace-profile-v1` software-feature dictionary (or JSON file) containing
+  `data_locality`, `inst_locality`, `recover_report`, optional `insn_portrait`, and pipeline
+  `health` counters.
+- It produces **software features only**. It intentionally does **not** attach any
+  hardware/microarchitecture parameters — that is the downstream consumer's job (ArchLens
+  joins these software features with its own architecture metadata).
+- Trace collection (`perf record`) and SDE-based validation are **out of scope** here.
+
+**Prerequisite**: build the recovery binary first (`bash build_recover_mem_addrs_uc.sh`),
+since the API reuses `recover_mem_addrs_uc`.
+
+### As a Python import
+
+```python
+from trace_feature_api import extract_software_features, FeatureExtractionConfig
+
+# Simplest form: defaults mirror the production pipeline.
+features = extract_software_features("perf.data")
+print(features["data_locality"])
+print(features["inst_locality"])
+print(features["insn_portrait"])   # None if portrait disabled/empty
+
+# With custom knobs and an explicit work dir (kept on disk for inspection).
+cfg = FeatureExtractionConfig(perf_max_insn_lines=1_000_000, insn_portrait=False)
+features = extract_software_features(
+    "perf.data", config=cfg, work_dir="outputs/_tmp_feat", keep_intermediate=True
+)
+```
+
+### As a CLI
+
+```bash
+python3 trace_feature_api.py perf.data -o features.json
+# keep intermediate artifacts for debugging:
+python3 trace_feature_api.py perf.data -o features.json --work-dir outputs/_tmp_feat --keep-intermediate
+```
+
+The batch runners (`run_spec5_*`, `run_cloud_perf_trace_analysis.py`) continue to call the
+lower-level `perf_pipeline.perf_postprocess_one()` directly and are unaffected by this API.
 
 ## Standalone analysis usage
 
