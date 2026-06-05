@@ -89,7 +89,7 @@ def flatten_portrait(portrait: dict[str, Any]) -> dict[str, Any]:
     if not portrait:
         return {}
     try:
-        import analyze_insn_trace_portrait as insn_portrait  # type: ignore
+        from intel_pt_trace_processing.core import portrait as insn_portrait
     except Exception:
         return {}
     flat = insn_portrait.flatten_portrait_metrics(portrait)

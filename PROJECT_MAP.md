@@ -1,6 +1,6 @@
 # Intel_PT_Trace_Processing Project Map (Current)
 
-The current main workflow is "Python orchestration + C core processing", and the perf-only post-processing logic is factored into a reusable module (`perf_pipeline.py`).
+The current main workflow is "Python orchestration + C core processing", and the perf-only post-processing logic is factored into a reusable module (`src/intel_pt_trace_processing/perf/pipeline.py`).
 
 For the full architecture and responsibility boundaries, see `docs/ARCHITECTURE.md`.
 For the detailed staged migration plan, see `docs/REFACTOR_PLAN.md`.
@@ -34,13 +34,13 @@ Public API for downstream projects (recommended integration point):
 
 - `scripts/collect/run_spec5_perf_trace_analysis.py`
   - Batch runner for SPEC CPU 5xx with warmup sweeps, but **without SDE** and without similarity compare
-  - Reuses `perf_pipeline.perf_postprocess_one` for the perf-only path
+  - Reuses `intel_pt_trace_processing.perf.pipeline.perf_postprocess_one` for the perf-only path
   - Useful for perf-only feature export / dataset generation / aligning SPEC and cloud outputs to the same schema
 
 - `scripts/collect/run_cloud_perf_trace_analysis.py`
   - Runs typical cloud services and benchmark clients inside Docker
   - Collection: `perf record` (Intel PT) targeting a single thread (busiest TID)
-  - Post-process: reuses `perf_pipeline.perf_postprocess_one`, producing analysis JSON in the same schema as SPEC perf-only
+  - Post-process: reuses `intel_pt_trace_processing.perf.pipeline.perf_postprocess_one`, producing analysis JSON in the same schema as SPEC perf-only
 
 - `scripts/model/run_miic_interval_backend.py`
   - Walks an existing output directory (SPEC or cloud layout) and finds `report/*.perf.recovered.data.analysis.json`
@@ -65,7 +65,7 @@ Public API for downstream projects (recommended integration point):
     - `*.perf.recovered.data.analysis.json`
     - `*.perf.inst.analysis.json`
 
-- `perf_pipeline.py`
+- `src/intel_pt_trace_processing/perf/pipeline.py`
   - Reusable perf-only post-processing layer: `perf.data → perf script → insn trace → recover_mem_addrs_uc → analysis JSON`
   - Key functions:
     - `add_perf_postprocess_args()` / `validate_perf_postprocess_args()`
@@ -106,7 +106,7 @@ Public API for downstream projects (recommended integration point):
   - Depends on XED headers/libraries and is built by `build_recover_mem_addrs_uc.sh`
     when a usable XED kit is available.
   - This is a future faster path; the public Python API currently uses
-    `perf_pipeline.py + recover_mem_addrs_uc`.
+    `src/intel_pt_trace_processing/perf/pipeline.py + recover_mem_addrs_uc`.
 
 - `csrc/trace_feature_core.h` / `csrc/trace_feature_core.c`
   - Shared feature/statistics core (RD/SDP/stride)
@@ -116,7 +116,7 @@ Public API for downstream projects (recommended integration point):
   - Input: two analysis JSON files (typically one from SDE, one from perf recovered)
   - Output: similarity metrics JSON (RD/SDP/stride, etc.)
 
-- `analyze_insn_trace_portrait.py`
+- `src/intel_pt_trace_processing/core/portrait.py`
   - Builds an "instruction portrait" (mix / branch stats / rates) and provides flatten helpers
   - Optional in perf-only pipeline (enabled by default) to produce `*.insn.portrait.json`
 

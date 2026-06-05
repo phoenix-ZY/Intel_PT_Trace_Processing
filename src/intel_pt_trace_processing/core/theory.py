@@ -49,7 +49,7 @@ def predict_from_trace_profile(profile: dict[str, Any], config: TheoryConfig) ->
         }
 
     try:
-        import analyze_insn_trace_portrait as insn_portrait  # type: ignore
+        from intel_pt_trace_processing.core import portrait as insn_portrait
         from intel_pt_trace_processing.model.miic_interval import CpuSprLikeConfig, MiicInputs, predict_interval_cycles
     except Exception as exc:
         return {

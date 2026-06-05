@@ -12,7 +12,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import analyze_insn_trace_portrait as insn_portrait
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from intel_pt_trace_processing.core import portrait as insn_portrait
 from export_trace_features_to_excel import write_csv, write_xlsx
 
 
@@ -511,7 +515,7 @@ def main() -> int:
 
     for bench, tag, data_json, portrait_json in cases:
         data_feat = load_locality_feature_from_analysis_json(data_json, access=args.access)
-        # perf_pipeline currently writes "<prefix>.perf.inst.analysis.json" (without "recovered" in filename).
+        # The perf pipeline currently writes "<prefix>.perf.inst.analysis.json" (without "recovered" in filename).
         inst_json_candidates = [
             Path(str(data_json).replace(".perf.recovered.data.analysis.json", ".perf.inst.analysis.json")),
             Path(str(data_json).replace(".perf.recovered.data.analysis.json", ".perf.recovered.inst.analysis.json")),

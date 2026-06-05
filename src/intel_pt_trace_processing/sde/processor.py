@@ -5,9 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from perf_pipeline import run_step
-
 from intel_pt_trace_processing.core.features import build_trace_profile, load_json_object
+from intel_pt_trace_processing.perf.pipeline import run_step
 
 
 @dataclass

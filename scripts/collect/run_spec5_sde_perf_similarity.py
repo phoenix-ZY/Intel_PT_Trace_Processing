@@ -22,9 +22,9 @@ for _path in (REPO_ROOT, SRC_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-import analyze_insn_trace_portrait as insn_portrait
-from perf_pipeline import perf_postprocess_one, run_step
-from perf_pipeline import add_perf_postprocess_args, validate_perf_postprocess_args
+from intel_pt_trace_processing.core import portrait as insn_portrait
+from intel_pt_trace_processing.perf.pipeline import perf_postprocess_one, run_step
+from intel_pt_trace_processing.perf.pipeline import add_perf_postprocess_args, validate_perf_postprocess_args
 
 DEFAULT_REPRESENTATIVE_BENCHES = [
     "505.mcf_r",  # memory-latency sensitive / pointer-chasing
@@ -1509,7 +1509,7 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
 
     # Fast path: reuse existing perf post-process artifacts if present.
     # IMPORTANT: if portrait is requested but portrait JSON is missing, do NOT return here —
-    # we still need to run perf --xed + portrait analysis (recover can be skipped inside perf_pipeline).
+    # we still need to run perf --xed + portrait analysis (recover can be skipped inside the perf pipeline).
     if (
         skip_existing
         and _nonempty(layout.perf_data_analysis_json)

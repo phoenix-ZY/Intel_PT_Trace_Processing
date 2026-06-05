@@ -46,7 +46,7 @@ Downstream (optional):
   instruction trace (`<tid> <time>: <ip> insn: <bytes...>`). It now also
   supports one-pass analysis output (instruction + recovered-data profiles).
 
-- `perf_pipeline.py`
+- `src/intel_pt_trace_processing/perf/pipeline.py`
   - Reusable perf-only post-processing core: `perf.data → perf script → insn trace → recover_mem_addrs_uc → analysis JSON`
   - Shared by the collectors under `scripts/collect/`
 
@@ -195,8 +195,8 @@ python3 trace_feature_api.py perf.data -o features.json --work-dir outputs/_tmp_
 python3 trace_feature_api.py perf.data -o features.json --theory-model
 ```
 
-The batch runners under `scripts/collect/` continue to call the
-lower-level `perf_pipeline.perf_postprocess_one()` directly and are unaffected by this API.
+The batch runners under `scripts/collect/` continue to call the lower-level
+`intel_pt_trace_processing.perf.pipeline.perf_postprocess_one()` directly.
 
 ## Standalone analysis usage
 

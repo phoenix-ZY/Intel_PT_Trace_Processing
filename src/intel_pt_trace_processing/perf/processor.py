@@ -7,11 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import analyze_insn_trace_portrait as insn_portrait
-from perf_pipeline import perf_postprocess_one
-
+from intel_pt_trace_processing.core import portrait as insn_portrait
 from intel_pt_trace_processing.core.features import build_trace_profile, load_json_object
 from intel_pt_trace_processing.core.theory import TheoryConfig, predict_from_trace_profile
+from intel_pt_trace_processing.perf.pipeline import perf_postprocess_one
 
 
 @dataclass

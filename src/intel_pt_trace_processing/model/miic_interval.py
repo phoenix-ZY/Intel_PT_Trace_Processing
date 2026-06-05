@@ -168,7 +168,7 @@ def load_portrait_flat(path: Path) -> dict[str, float]:
     Use the existing portrait JSON format; keep dependency on the repo local.
     """
     # Local import to keep this module usable standalone.
-    import analyze_insn_trace_portrait as insn_portrait  # type: ignore
+    from intel_pt_trace_processing.core import portrait as insn_portrait
 
     obj = _load_json(path)
     flat = insn_portrait.flatten_portrait_metrics(obj)
@@ -341,4 +341,3 @@ def predict_interval_cycles(inputs: MiicInputs, *, cfg: CpuSprLikeConfig) -> Mii
         "mlp": float(mlp),
     }
     return MiicPrediction(cycles=float(cycles), ipc=float(ipc), cpi=float(cpi), stack=stack, derived=derived)
-

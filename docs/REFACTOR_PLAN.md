@@ -26,9 +26,8 @@ scripts/
   tools/               compare/export/plot CLIs
 ```
 
-The repository root keeps stable user-facing API/build files and compatibility
-modules only: `trace_feature_api.py`, `build_recover_mem_addrs_uc.sh`,
-`perf_pipeline.py`, and `analyze_insn_trace_portrait.py`.
+The repository root keeps stable user-facing API/build files only:
+`trace_feature_api.py` and `build_recover_mem_addrs_uc.sh`.
 
 ## Core Perf Processing
 
@@ -53,7 +52,7 @@ Current implementation status:
 - `src/intel_pt_trace_processing/perf/processor.py` is the new Python-facing
   one-shot processor.
 - It currently delegates instruction traversal to the existing mature path:
-  `perf_pipeline.py + recover_mem_addrs_uc`.
+  `src/intel_pt_trace_processing/perf/pipeline.py + recover_mem_addrs_uc`.
 - `csrc/trace_feature_processor.c` is the experimental future single-pass stream
   processor that already combines recovery, locality, and XED portrait data.
 - `trace_feature_api.py` now delegates to the new processor package while keeping
@@ -130,7 +129,7 @@ or removing feature columns should not require editing each collector.
 Current implementation status:
 
 - Collection scripts now live under `scripts/collect/`.
-- They already share `perf_pipeline.py`.
+- They already share `src/intel_pt_trace_processing/perf/pipeline.py`.
 - `src/intel_pt_trace_processing/tools/flatten.py` can flatten returned
   `trace-profile-v1` dictionaries and write dynamic-column CSVs.
 - Next migration step: replace direct `perf_postprocess_one()` calls in collectors
@@ -173,6 +172,6 @@ Current implementation status:
 3. Route SDE through `src/intel_pt_trace_processing/sde`.
 4. Convert SPEC/cloud scripts into thin collection wrappers.
 5. Consolidate flatten/export logic so CSV columns come from returned profiles.
-6. Move the remaining compatibility modules (`perf_pipeline.py`,
-   `analyze_insn_trace_portrait.py`) into `src/` once all old scripts have been
-   routed through the new processors.
+6. Route the remaining collector post-processing calls through
+   `process_perf_data()` and `process_sde_debugtrace()` so collection scripts
+   become thin orchestration wrappers.

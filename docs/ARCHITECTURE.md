@@ -32,14 +32,14 @@ point is:
   - Public API for downstream projects.
   - Input: one `perf.data`.
   - Output: one `trace-profile-v1` software-feature dictionary or JSON file.
-  - It wraps `perf_pipeline.perf_postprocess_one()` and hides intermediate paths.
+  - It wraps `intel_pt_trace_processing.perf.pipeline.perf_postprocess_one()` and hides intermediate paths.
 
 The lower-level implementation is:
 
 - `src/intel_pt_trace_processing/perf/processor.py`
   - New Python-facing one-shot processor for `perf.data`.
   - Returns the normalized `trace-profile-v1` shape.
-- `perf_pipeline.py`
+- `src/intel_pt_trace_processing/perf/pipeline.py`
   - Shared perf-only post-processing:
     `perf.data -> perf script --insn-trace -> instruction trace -> recovered memory -> analysis JSON`.
 - `csrc/recover_mem_addrs_uc.c`
@@ -47,7 +47,7 @@ The lower-level implementation is:
   - Emits recovered memory JSONL plus data/instruction locality analysis JSON.
 - `csrc/trace_feature_core.c` / `csrc/trace_feature_core.h`
   - Shared RD/SDP/stride feature core.
-- `analyze_insn_trace_portrait.py`
+- `src/intel_pt_trace_processing/core/portrait.py`
   - Optional instruction portrait from `perf script --xed` output.
 
 There is also a newer experimental one-pass C processor:
@@ -56,7 +56,7 @@ There is also a newer experimental one-pass C processor:
   - Streams `perf script --insn-trace` text from stdin and emits a combined feature JSON.
   - Depends on XED headers and libraries.
   - Currently useful as a faster future direction, but `trace_feature_api.py` still uses
-    the established `perf_pipeline.py + recover_mem_addrs_uc` path.
+    the established package pipeline plus `recover_mem_addrs_uc` path.
 
 ## 3. Validate recovered perf features against SDE ground truth
 
@@ -125,7 +125,7 @@ For validation:
 
 ```text
 SDE debugtrace -> csrc/analyze_sde_trace_uc -> SDE truth features
-perf.data      -> trace_feature_api/perf_pipeline -> recovered perf features
+perf.data      -> trace_feature_api/package pipeline -> recovered perf features
 both           -> scripts/tools/compare_mem_trace_metrics.py -> similarity report
 ```
 
