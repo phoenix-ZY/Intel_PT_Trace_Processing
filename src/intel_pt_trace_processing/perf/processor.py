@@ -93,7 +93,6 @@ def process_perf_data(
     owns_work_dir = work_dir is None
     base_dir = Path(tempfile.mkdtemp(prefix="trace_feat_")) if owns_work_dir else Path(work_dir).resolve()
     intermediate_dir = base_dir / "intermediate"
-    mem_dir = base_dir / "mem"
     report_dir = base_dir / "report"
 
     try:
@@ -103,7 +102,6 @@ def process_perf_data(
             perf_data=perf_data_path,
             prefix=prefix,
             intermediate_dir=intermediate_dir,
-            mem_dir=mem_dir,
             report_dir=report_dir,
             perf_max_insn_lines=cfg.perf_max_insn_lines,
             line_size=cfg.line_size,
@@ -128,7 +126,6 @@ def process_perf_data(
         artifacts: dict[str, Path | None] = {
             "work_dir": base_dir,
             "stream_profile_json": stream_result.combined_json,
-            "perf_recovered_memory": stream_result.recovered_mem_jsonl,
             "data_analysis_json": stream_result.data_analysis_json,
             "instruction_analysis_json": stream_result.inst_analysis_json,
             "recover_report_json": stream_result.recover_report_json,

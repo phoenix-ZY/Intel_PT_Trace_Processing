@@ -15,7 +15,6 @@ class PerfStreamResult:
     trace_errors: int
     insn_lines: int
     combined_json: Path
-    recovered_mem_jsonl: Path
     data_analysis_json: Path
     inst_analysis_json: Path
     recover_report_json: Path
@@ -125,7 +124,6 @@ def process_perf_stream(
     perf_data: Path,
     prefix: str,
     intermediate_dir: Path,
-    mem_dir: Path,
     report_dir: Path,
     perf_max_insn_lines: int,
     line_size: int,
@@ -149,11 +147,9 @@ def process_perf_stream(
         raise RuntimeError(f"missing {processor_bin}; run build_recover_mem_addrs_uc.sh first")
 
     intermediate_dir.mkdir(parents=True, exist_ok=True)
-    mem_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
 
     combined_json = report_dir / f"{prefix}.trace_profile.stream.json"
-    perf_rec_mem = mem_dir / f"{prefix}.perf.mem.recovered.jsonl"
     perf_data_analysis = report_dir / f"{prefix}.perf.recovered.data.analysis.json"
     perf_inst_analysis = report_dir / f"{prefix}.perf.inst.analysis.json"
     perf_recover_report = report_dir / f"{prefix}.perf.recover.report.json"
@@ -176,8 +172,6 @@ def process_perf_stream(
         str(processor_bin),
         "--out",
         str(combined_json),
-        "--mem-out",
-        str(perf_rec_mem),
         "--max-insns",
         str(perf_max_insn_lines),
         "--progress-every",
@@ -254,7 +248,6 @@ def process_perf_stream(
         trace_errors=trace_errors,
         insn_lines=insn_lines,
         combined_json=combined_json,
-        recovered_mem_jsonl=perf_rec_mem,
         data_analysis_json=perf_data_analysis,
         inst_analysis_json=perf_inst_analysis,
         recover_report_json=perf_recover_report,

@@ -36,13 +36,12 @@ Public API for downstream projects (recommended integration point):
 
 - `scripts/collect/run_cloud_perf_trace_analysis.py`
   - Runs typical cloud services and benchmark clients inside Docker
-  - Collection: `perf record` (Intel PT) targeting a single thread (busiest TID)
+  - Collection: target workload is pinned to one CPU/core; `perf record` uses Intel PT with `perf -C`
   - Post-process: reuses `intel_pt_trace_processing.perf.stream.process_perf_stream`, producing analysis JSON in the same schema as SPEC perf-only
 
 - `csrc/analyze_sde_trace_uc.c`
   - Input: SDE debugtrace
   - Outputs (optional combinations):
-    - `*.sde.mem.real.jsonl`
     - `*.sde.insn.trace.txt`
     - `*.sde.data.analysis.json`
     - `*.sde.inst.analysis.json`
@@ -50,7 +49,6 @@ Public API for downstream projects (recommended integration point):
 - `csrc/recover_mem_addrs_uc.c`
   - Input: perf instruction trace (`<tid> <time>: <ip> insn: <bytes...>`)
   - Outputs:
-    - `*.perf.mem.recovered.jsonl`
     - `*.perf.recovered.data.analysis.json`
     - `*.perf.inst.analysis.json`
 
@@ -122,10 +120,6 @@ Public API for downstream projects (recommended integration point):
 - `outputs/<spec_out>/<bench>/<warmup>/intermediate`
   - `perf.data`, `*.perf.script.txt`, `*.perf.insn.trace.txt`, optional portrait temp files
 
-- `outputs/<spec_out>/<bench>/<warmup>/mem`
-  - `*.sde.mem.real.jsonl` (only SDE vs perf)
-  - `*.perf.mem.recovered.jsonl`
-
 - `outputs/<spec_out>/<bench>/<warmup>/report`
   - `*.sde.data.analysis.json`
   - `*.sde.inst.analysis.json`
@@ -138,9 +132,6 @@ Public API for downstream projects (recommended integration point):
 
 - `outputs/cloud_trace/<service>.<config>/intermediate`
   - `*.perf.script.txt`, `*.perf.insn.trace.txt`, optional portrait temp files
-
-- `outputs/cloud_trace/<service>.<config>/mem`
-  - `*.perf.mem.recovered.jsonl`
 
 - `outputs/cloud_trace/<service>.<config>/report`
   - `*.perf.recovered.data.analysis.json`

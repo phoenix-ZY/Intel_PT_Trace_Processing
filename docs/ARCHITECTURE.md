@@ -13,8 +13,8 @@ It should not be the integration point for downstream feature consumers.
 - `scripts/collect/run_spec5_perf_trace_analysis.py`
   - SPEC CPU perf-only collection and post-processing.
 - `scripts/collect/run_cloud_perf_trace_analysis.py`
-  - Docker/cloud workload orchestration, worker-thread selection, `perf record`,
-    optional `perf stat`, and post-processing.
+  - Docker/cloud workload orchestration, CPU pinning (`taskset` / Docker cpuset),
+    `perf record -C`, optional `perf stat`, and post-processing.
 - `scripts/collect/run_spec5_sde_perf_similarity.py`
   - SPEC collection for both SDE and perf when validation against SDE is needed.
 
@@ -45,7 +45,7 @@ The lower-level implementation is:
     `perf.data -> perf script --insn-trace -> trace_feature_processor -> analysis JSON`.
 - `csrc/trace_feature_processor.c`
   - Unicorn-based recovery from decoded instruction stream.
-  - Emits recovered memory JSONL, data/instruction locality analysis, XED portrait statistics, and one combined JSON.
+  - Emits data/instruction locality analysis, XED portrait statistics, and one combined JSON.
 - `csrc/trace_feature_core.c` / `csrc/trace_feature_core.h`
   - Shared RD/SDP/stride feature core.
 - `src/intel_pt_trace_processing/core/portrait_metrics.py`
@@ -80,7 +80,7 @@ accesses from SDE?"
 
 - `csrc/analyze_sde_trace_uc.c`
   - One-pass SDE debugtrace analyzer.
-  - Emits real memory JSONL, SDE instruction trace, and data/instruction analysis JSON.
+  - Emits SDE instruction trace and data/instruction analysis JSON.
 - `scripts/tools/compare_mem_trace_metrics.py`
   - Compares SDE analysis JSON against perf-recovered analysis JSON.
 - `scripts/tools/align_insn_traces.py`

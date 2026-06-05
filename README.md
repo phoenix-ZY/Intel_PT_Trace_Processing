@@ -23,16 +23,15 @@ responsibility boundaries.
 
 - `scripts/collect/run_spec5_perf_trace_analysis.py`
   - SPEC CPU 5xx **perf-only** (no SDE, no similarity compare)
-  - Outputs: per-case recovered mem JSONL + `*.perf.*.analysis.json` + batch `summary.json`/`summary.csv`
+  - Outputs: per-case stream profile + `*.perf.*.analysis.json` + batch `summary.json`/`summary.csv`
 
 - `scripts/collect/run_cloud_perf_trace_analysis.py`
   - Runs classic cloud services and benchmark clients in Docker (redis/nginx/haproxy/postgres/mysql/memcached, etc.)
-  - Captures perf Intel PT from a single worker thread, then reuses the same perf-only stream processor
-  - Outputs: `intermediate/`, `mem/`, `report/` under each `<service>.<config>/`
+  - Pins the target workload to one CPU/core, captures perf Intel PT with `perf -C`, then reuses the same perf-only stream processor
+  - Outputs: `intermediate/` and `report/` under each `<service>.<config>/`
 
 - `csrc/analyze_sde_trace_uc.c` + `build_recover_mem_addrs_uc.sh`
   One-pass SDE analyzer for debugtrace input. In a single scan, it can emit:
-  - data mem JSONL (`*.sde.mem.real.jsonl`)
   - instruction trace (`*.sde.insn.trace.txt`)
   - SDE data analysis JSON
   - SDE instruction analysis JSON
@@ -124,8 +123,7 @@ Cloud layout:
   `outputs/cloud_trace/<service>.<config>/`
 - Under each config:
   - `intermediate/`: copied `*.perf.data` and optional temporary/debug files
-  - `mem/`: `*.perf.mem.recovered.jsonl`
-  - `report/`: `*.perf.*.analysis.json`, stderr/logs, optional portrait artifacts
+  - `report/`: stream profile, `*.perf.*.analysis.json`, stderr/logs, optional portrait artifacts
 
 ## Software-feature API (for downstream)
 
@@ -184,18 +182,16 @@ The batch runners under `scripts/collect/` call the lower-level
 ```bash
 ./analyze_sde_trace_uc \
   -i path/to/sde.debugtrace.txt \
-  --mem-out out.sde.mem.real.jsonl \
   --insn-out out.sde.insn.trace.txt \
   --data-analysis-out out.sde.data.analysis.json \
   --inst-analysis-out out.sde.inst.analysis.json
 ```
 
-### Recover perf mem + analyze in one pass (C)
+### Recover perf data locality + analyze in one pass (C)
 
 ```bash
 ./recover_mem_addrs_uc \
   -i path/to/perf.insn.trace.txt \
-  -o out.perf.mem.recovered.jsonl \
   --inst-analysis-out out.perf.inst.analysis.json \
   --data-analysis-out out.perf.recovered.data.analysis.json
 ```

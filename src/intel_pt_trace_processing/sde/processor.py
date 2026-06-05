@@ -65,14 +65,11 @@ def process_sde_debugtrace(
         raise RuntimeError(f"missing {analyzer}; run build_recover_mem_addrs_uc.sh first")
 
     out_dir = Path(output_dir).resolve()
-    mem_dir = out_dir / "mem"
     report_dir = out_dir / "report"
     intermediate_dir = out_dir / "intermediate"
-    mem_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
     intermediate_dir.mkdir(parents=True, exist_ok=True)
 
-    mem_jsonl = mem_dir / f"{prefix}.sde.mem.real.jsonl"
     data_analysis = report_dir / f"{prefix}.sde.data.analysis.json"
     insn_trace = intermediate_dir / f"{prefix}.sde.insn.trace.txt" if cfg.emit_instruction_trace else None
     inst_analysis = report_dir / f"{prefix}.sde.inst.analysis.json" if cfg.emit_instruction_analysis else None
@@ -81,8 +78,6 @@ def process_sde_debugtrace(
         str(analyzer),
         "-i",
         str(trace_path),
-        "--mem-out",
-        str(mem_jsonl),
         "--data-analysis-out",
         str(data_analysis),
         "--analysis-line-size",
@@ -108,7 +103,6 @@ def process_sde_debugtrace(
 
     artifacts: dict[str, Path | None] = {
         "work_dir": out_dir,
-        "sde_memory_trace": mem_jsonl,
         "data_analysis_json": data_analysis,
         "instruction_trace": insn_trace,
         "instruction_analysis_json": inst_analysis,
