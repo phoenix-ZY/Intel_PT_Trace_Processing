@@ -19,22 +19,23 @@ responsibility boundaries.
   - Produces two reference paths per case:
     - SDE debugtrace (real memory accesses)
     - perf Intel PT (recovered memory accesses from decoded instruction trace)
-  - Outputs: per-case SDE/perf analysis JSON + similarity compare JSON + batch `summary.json`/`summary.csv`
+  - Outputs: per-case SDE/perf `trace_profile.json` + similarity compare JSON + batch `summary.json`/`summary.csv`
 
 - `scripts/collect/run_spec5_perf_trace_analysis.py`
   - SPEC CPU 5xx **perf-only** (no SDE, no similarity compare)
-  - Outputs: per-case stream profile + `*.perf.*.analysis.json` + batch `summary.json`/`summary.csv`
+  - Outputs: per-case `report/<prefix>.trace_profile.json` + batch `summary.json`/`summary.csv`
 
 - `scripts/collect/run_cloud_perf_trace_analysis.py`
   - Runs classic cloud services and benchmark clients in Docker (redis/nginx/haproxy/postgres/mysql/memcached, etc.)
-  - Pins the target workload to one CPU/core, captures perf Intel PT with `perf -C`, then reuses the same perf-only stream processor
+  - Pins the target workload to one CPU/core and captures only its Docker cgroup with `perf -a -C <cpu> -G <cgroup>`
+  - `sudo perf record` stores container binaries in root's build-id cache; the cache is verified before each container is removed
+  - After all collection finishes, runs parallel `sudo perf script` jobs from that cache
   - Outputs: `intermediate/` and `report/` under each `<service>.<config>/`
 
 - `csrc/analyze_sde_trace_uc.c` + `build_recover_mem_addrs_uc.sh`
   One-pass SDE analyzer for debugtrace input. In a single scan, it can emit:
   - instruction trace (`*.sde.insn.trace.txt`)
-  - SDE data analysis JSON
-  - SDE instruction analysis JSON
+  - SDE data-memory statistics consumed by the final SDE `trace_profile.json`
 
 - `csrc/recover_mem_addrs_uc.c` + `build_recover_mem_addrs_uc.sh`
   Unicorn-based C recovery tool that reconstructs memory accesses from
@@ -43,7 +44,7 @@ responsibility boundaries.
 
 - `src/intel_pt_trace_processing/perf/stream.py`
   - Reusable perf-only post-processing core:
-    `perf.data -> perf script -> trace_feature_processor -> combined JSON`
+    `perf.data -> perf script -> trace_feature_processor -> trace_profile.json`
   - Shared by the collectors under `scripts/collect/`
 
 - `trace_feature_api.py` **(public software-feature API — recommended for downstream)**
@@ -51,9 +52,10 @@ responsibility boundaries.
     `extract_software_features(perf_data) -> dict`
   - Delegates to `src/intel_pt_trace_processing/perf/processor.py`
   - Wraps the one-pass stream processor and hides the low-level parameter/path bookkeeping
-  - Produces **software features only** (instruction-flow, data/instruction locality, optional
-    instruction portrait); attaching hardware/microarchitecture parameters is left to the
-    downstream consumer (e.g. ArchLens). See [Software-feature API](#software-feature-api-for-downstream) below.
+  - Produces **software features only** in seven groups: instruction mix, data memory,
+    instruction memory, branch, syscall, register dependency, and IPC. Attaching
+    hardware/microarchitecture parameters is left to the downstream consumer (e.g. ArchLens).
+    See [Software-feature API](#software-feature-api-for-downstream) below.
 
 - `csrc/trace_feature_processor.c` **(default one-pass stream processor)**
   - Reads `perf script --insn-trace` text from stdin and emits one combined feature JSON
@@ -61,10 +63,8 @@ responsibility boundaries.
   - Built by `build_recover_mem_addrs_uc.sh` when XED headers/libraries are available
 
 - `scripts/tools/compare_mem_trace_metrics.py`
-  Compares two analysis JSON files:
-  - RD similarity (`r2`, `l1`, `topk_wmape`, cold-ratio diff)
-  - SDP similarity (`r2`, `mean_abs_error`, `max_abs_error`)
-  - Stride similarity (`r2`, `l1`, `jsd`)
+  Compares two final memory feature groups from `trace_profile.json`:
+  - named-vector similarity (`cosine`, `pearson_r`, `r2`, `l1_mean_abs`, top differing dims)
 
 - `scripts/tools/align_insn_traces.py`
   Unified instruction-trace alignment tool:
@@ -101,14 +101,24 @@ python3 scripts/collect/run_spec5_perf_trace_analysis.py \
 
 ### 4) Run cloud apps (perf-only)
 
-> This script drives Docker and perf and often requires root privileges (depending on your host and `perf_event_paranoid`).
-
 ```bash
-sudo python3 scripts/collect/run_cloud_perf_trace_analysis.py \
+python3 scripts/collect/run_cloud_perf_trace_analysis.py \
   --output-dir outputs/cloud_trace \
-  --service redis \
-  --samples-per-config 2
+  --service nginx \
+  --config-name w1_small \
+  --perf-cpu 6 \
+  --target-cpuset 6 \
+  --sudo-perf
 ```
+
+`--sudo-perf` elevates only perf commands (`record`, `stat`, `buildid-cache`,
+and `script`). The feature processor still runs as the invoking user. Sudo
+authorization is requested before workloads start and refreshed during long runs.
+
+Cloud decoding relies on the build-id cache belonging to the same sudo user.
+Each sample is checked with `perf buildid-cache -M` both after recording and
+before decoding. To move `perf.data` to another machine, transfer its matching
+objects with `perf archive`; the original machine's cache is not portable.
 
 ### 5) Inspect outputs
 
@@ -123,7 +133,7 @@ Cloud layout:
   `outputs/cloud_trace/<service>.<config>/`
 - Under each config:
   - `intermediate/`: copied `*.perf.data` and optional temporary/debug files
-  - `report/`: stream profile, `*.perf.*.analysis.json`, stderr/logs, optional portrait artifacts
+  - `report/`: canonical `*.trace_profile.json`, stderr/logs, optional compare artifacts
 
 ## Software-feature API (for downstream)
 
@@ -135,9 +145,12 @@ recover/analysis knobs, or the output directory layout.
 **Scope / responsibility boundary**
 
 - Input: a single raw Intel PT capture (`perf.data`).
-- Output: a `trace-profile-v1` software-feature dictionary (or JSON file) containing
-  `data_locality`, `inst_locality`, `recover_report`, optional `insn_portrait`, and processor
-  `health` counters.
+- Output: a `trace-profile-v2` software-feature dictionary (or JSON file) containing exactly
+  these feature groups: `features.instruction_mix`, `features.data_memory`,
+  `features.instruction_memory`, `features.branch`, `features.syscall`,
+  `features.register_dependency`, and `features.ipc`.
+- Runtime/debug details such as source path, artifacts, health counters, and recovery counters
+  live under `metadata` and are not part of the downstream feature vector.
 - It produces **software features only**. It intentionally does **not** attach any
   hardware/microarchitecture parameters — that is the downstream consumer's job (ArchLens
   joins these software features with its own architecture metadata).
@@ -153,9 +166,11 @@ from trace_feature_api import extract_software_features, FeatureExtractionConfig
 
 # Simplest form: defaults mirror the production stream processor.
 features = extract_software_features("perf.data")
-print(features["data_locality"])
-print(features["inst_locality"])
-print(features["insn_portrait"])   # None if portrait disabled/empty
+print(features["features"]["instruction_mix"])
+print(features["features"]["data_memory"])
+print(features["features"]["instruction_memory"])
+print(features["features"]["syscall"])
+print(features["metadata"]["health"])   # bookkeeping only, not a model feature
 
 # With custom knobs and an explicit work dir (kept on disk for inspection).
 cfg = FeatureExtractionConfig(perf_max_insn_lines=1_000_000, insn_portrait=False)
@@ -183,8 +198,7 @@ The batch runners under `scripts/collect/` call the lower-level
 ./analyze_sde_trace_uc \
   -i path/to/sde.debugtrace.txt \
   --insn-out out.sde.insn.trace.txt \
-  --data-analysis-out out.sde.data.analysis.json \
-  --inst-analysis-out out.sde.inst.analysis.json
+  --data-analysis-out out.sde.data.analysis.json
 ```
 
 ### Recover perf data locality + analyze in one pass (C)
@@ -200,8 +214,9 @@ The batch runners under `scripts/collect/` call the lower-level
 
 ```bash
 python3 scripts/tools/compare_mem_trace_metrics.py \
-  --ref-analysis ref.analysis.json \
-  --test-analysis test.analysis.json \
+  --ref-profile ref.trace_profile.json \
+  --test-profile test.trace_profile.json \
+  --memory data \
   --json-out compare.json
 ```
 

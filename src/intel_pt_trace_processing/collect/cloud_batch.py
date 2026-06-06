@@ -10,10 +10,10 @@ each service config, and optionally runs batch post-processing.
 from __future__ import annotations
 
 import concurrent.futures
-import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -47,6 +47,21 @@ def _services_to_run(service: str) -> list[str]:
     return [service]
 
 
+def _start_sudo_keepalive() -> threading.Event:
+    stop = threading.Event()
+
+    def refresh() -> None:
+        while not stop.wait(60.0):
+            subprocess.run(
+                ["sudo", "-n", "-v"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    threading.Thread(target=refresh, name="sudo-keepalive", daemon=True).start()
+    return stop
+
+
 def main():
     args = parse_cloud_args()
 
@@ -56,6 +71,12 @@ def main():
 
     if not perf_tool.is_file() or not os.access(perf_tool, os.X_OK):
         sys.exit(f"❌ perf tool not executable: {perf_tool}")
+    if args.sudo_perf:
+        try:
+            subprocess.run(["sudo", "-v"], check=True)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            sys.exit(f"sudo authorization failed: {exc}")
+    sudo_keepalive = _start_sudo_keepalive() if args.sudo_perf else None
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -66,6 +87,17 @@ def main():
 
     all_configs = build_config_matrix(project_dir, target_cpuset=args.target_cpuset)
     services_to_run = _services_to_run(args.service)
+    if args.config_name:
+        for service_name in services_to_run:
+            all_configs[service_name] = [
+                config
+                for config in all_configs[service_name]
+                if config["config_name"] == args.config_name
+            ]
+        if not any(all_configs[service_name] for service_name in services_to_run):
+            sys.exit(
+                f"config_name {args.config_name!r} was not found in service selection {args.service!r}"
+            )
 
     total_configs = sum(len(all_configs[s]) for s in services_to_run)
     print(f"\n📁 Output dir : {output_dir}")
@@ -100,18 +132,20 @@ def main():
                 max_samples=args.samples_per_config,
                 warmup_duration=args.warmup_duration,
                 cli_args=args,
-                inline_postprocess=(args.post_process_mode == "inline"),
             )
-            if not args.no_post_process and args.post_process_mode == "batch":
+            if not args.no_post_process:
                 benches_for_post.add(f"{config['service_type']}.{config['config_name']}")
 
-    if not args.no_post_process and args.post_process_mode == "batch" and benches_for_post:
-        workers = max(1, int(getattr(args, "post_workers", 8)))
+    docker_stop_rm(BENCH_CONTAINER)
+    run_cmd(["docker", "network", "rm", NETWORK_NAME])
+
+    if benches_for_post:
+        workers = min(int(args.post_workers), len(benches_for_post))
         log("🧰", f"Batch post-process: benches={len(benches_for_post)} workers={workers}")
-        fut_map: dict[concurrent.futures.Future[None], str] = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(benches_for_post))) as ex:
+        futures: dict[concurrent.futures.Future[None], str] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             for bench_name in sorted(benches_for_post):
-                fut = ex.submit(
+                future = executor.submit(
                     cloud_run_perf_postprocess,
                     script_dir=SCRIPT_DIR,
                     output_dir=output_dir,
@@ -119,18 +153,18 @@ def main():
                     perf_tool=perf_tool,
                     args=args,
                 )
-                fut_map[fut] = bench_name
-            for fut in concurrent.futures.as_completed(fut_map):
-                bench_name = fut_map[fut]
+                futures[future] = bench_name
+            for future in concurrent.futures.as_completed(futures):
+                bench_name = futures[future]
                 try:
-                    fut.result()
-                except Exception as e:
-                    log("❌", f"Post-process failed for {bench_name}: {e}")
+                    future.result()
+                except Exception as exc:
+                    log("❌", f"Post-process failed for {bench_name}: {exc}")
                     if args.stop_on_post_error:
                         raise
 
-    docker_stop_rm(BENCH_CONTAINER)
-    run_cmd(["docker", "network", "rm", NETWORK_NAME])
+    if sudo_keepalive is not None:
+        sudo_keepalive.set()
 
     print(f"\n🎉 All cloud benchmarks finished! Data saved to: {output_dir}")
     if args.export_full_features:

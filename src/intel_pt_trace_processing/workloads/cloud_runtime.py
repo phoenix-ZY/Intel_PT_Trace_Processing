@@ -49,6 +49,30 @@ def docker_inspect_pid(container: str) -> int | None:
         return int(pid_str)
     return None
 
+
+def docker_perf_event_cgroup(container_pid: int) -> str | None:
+    try:
+        lines = Path(f"/proc/{container_pid}/cgroup").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        controllers = parts[1].split(",")
+        if "perf_event" not in controllers:
+            continue
+        cgroup = parts[2].strip().lstrip("/")
+        if not cgroup:
+            return None
+        if not (Path("/sys/fs/cgroup/perf_event") / cgroup).is_dir():
+            return None
+        return cgroup
+    return None
+
+
 def pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)

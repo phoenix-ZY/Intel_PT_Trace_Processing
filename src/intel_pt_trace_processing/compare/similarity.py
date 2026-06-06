@@ -6,109 +6,57 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+from intel_pt_trace_processing.core.features import load_json_object, memory_feature_view
+
 
 def load_compare_metrics(path: Path, metric_prefix: str = "") -> dict:
     obj = json.loads(path.read_text(encoding="utf-8"))
     out: dict[str, object] = {}
-    excluded = obj.get("excluded_feature_scalars")
-    if isinstance(excluded, list):
-        out[f"{metric_prefix}excluded_feature_scalars"] = "|".join(str(x) for x in excluded)
-    accesses = obj.get("accesses") or list(obj.get("per_access", {}).keys())
-    for access in accesses:
-        pa = obj["per_access"][access]
-        p = f"{metric_prefix}{access}_"
-        for section, section_prefix in (("metrics", "rd_"), ("feature_metrics", "")):
-            metrics = pa.get(section, {})
-            if isinstance(metrics, dict):
-                for k, v in metrics.items():
-                    if isinstance(v, (int, float)):
-                        out[f"{p}{section_prefix}{k}"] = v
-        for section, section_prefix in (("sdp", "sdp_"), ("stride", "stride_")):
-            metrics = pa.get(section, {}).get("metrics", {})
-            if isinstance(metrics, dict):
-                for k, v in metrics.items():
-                    if isinstance(v, (int, float)):
-                        out[f"{p}{section_prefix}{k}"] = v
-        ov = pa.get("overall_vector", {})
-        om = ov.get("metrics", {}) if isinstance(ov, dict) else {}
-        if isinstance(om, dict):
-            for k, v in om.items():
-                if isinstance(v, (int, float)):
-                    out[f"{p}overall_{k}"] = v
-        comps = om.get("overall_score_components") if isinstance(om, dict) else None
-        if isinstance(comps, dict):
-            for k, v in comps.items():
-                if isinstance(v, (int, float)):
-                    out[f"{p}overall_component_{k}"] = v
-        out[f"{p}overall_dims"] = ov.get("dimensions", 0) if isinstance(ov, dict) else 0
-        top_dims = ov.get("largest_error_dims", []) if isinstance(ov, dict) else []
+    if obj.get("schema") != "trace-feature-vector-compare-v1":
+        return out
+    ov = obj.get("overall_vector", {})
+    metrics = ov.get("metrics", {}) if isinstance(ov, dict) else {}
+    if isinstance(metrics, dict):
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)):
+                out[f"{metric_prefix}overall_{key}"] = value
+    if isinstance(ov, dict):
+        dims = ov.get("dimensions")
+        if isinstance(dims, (int, float)):
+            out[f"{metric_prefix}overall_dims"] = dims
+        top_dims = ov.get("largest_error_dims", [])
         top0 = top_dims[0] if top_dims and isinstance(top_dims[0], dict) else {}
-        out[f"{p}overall_top_dim"] = top0.get("dimension", "")
-        out[f"{p}overall_top_dim_abs_diff"] = top0.get("abs_diff", 0.0)
-        top3 = [x.get("dimension", "") for x in top_dims[:3] if isinstance(x, dict) and x.get("dimension")]
-        out[f"{p}overall_top3_dims"] = "|".join(top3)
+        out[f"{metric_prefix}overall_top_dim"] = top0.get("dimension", "")
+        out[f"{metric_prefix}overall_top_dim_abs_diff"] = top0.get("abs_diff", 0.0)
+        out[f"{metric_prefix}overall_top3_dims"] = "|".join(
+            str(x.get("dimension", ""))
+            for x in top_dims[:3]
+            if isinstance(x, dict) and x.get("dimension")
+        )
     return out
 
 
 def maybe_write_feature_bundle(
     *,
     out_path: Path,
-    sde_data_analysis: Path,
-    sde_inst_analysis: Path,
-    perf_data_analysis: Path,
-    perf_inst_analysis: Path,
+    sde_profile: Path,
+    perf_profile: Path,
     data_compare: Path,
-    inst_compare: Path,
 ) -> None:
-    def pick_features(analysis_obj: dict) -> dict:
-        per = analysis_obj.get("per_access", {})
-        out: dict[str, dict] = {}
-        for access, access_obj in per.items():
-            feat = access_obj.get("feature")
-            if isinstance(feat, dict):
-                out[access] = feat
-        return out
-
-    sde_data = json.loads(sde_data_analysis.read_text(encoding="utf-8"))
-    sde_inst = json.loads(sde_inst_analysis.read_text(encoding="utf-8"))
-    perf_data = json.loads(perf_data_analysis.read_text(encoding="utf-8"))
-    perf_inst = json.loads(perf_inst_analysis.read_text(encoding="utf-8"))
+    sde_obj = load_json_object(sde_profile)
+    sde_data = memory_feature_view(sde_obj, memory="data")
+    perf_obj = load_json_object(perf_profile)
+    perf_data = memory_feature_view(perf_obj, memory="data")
     data_cmp = json.loads(data_compare.read_text(encoding="utf-8"))
-    inst_cmp = json.loads(inst_compare.read_text(encoding="utf-8"))
 
     bundle = {
-        "schema": "trace-feature-bundle-v1",
-        "line_size": sde_data.get("line_size"),
-        "rd_definition": sde_data.get("rd_definition"),
-        "rd_hist_cap_lines": sde_data.get("rd_hist_cap_lines"),
-        "stride_bin_cap_lines": sde_data.get("stride_bin_cap_lines"),
+        "schema": "trace-feature-bundle-v2",
         "data": {
-            "ref_path": sde_data.get("input_path"),
-            "test_path": perf_data.get("input_path"),
-            "ref_features": pick_features(sde_data),
-            "test_features": pick_features(perf_data),
-            "feature_metrics": {
-                access: data_cmp.get("per_access", {}).get(access, {}).get("feature_metrics", {})
-                for access in data_cmp.get("accesses", [])
-            },
-            "overall_vector_similarity": {
-                access: data_cmp.get("per_access", {}).get(access, {}).get("overall_vector", {})
-                for access in data_cmp.get("accesses", [])
-            },
-        },
-        "inst": {
-            "ref_path": sde_inst.get("input_path"),
-            "test_path": perf_inst.get("input_path"),
-            "ref_features": pick_features(sde_inst),
-            "test_features": pick_features(perf_inst),
-            "feature_metrics": {
-                access: inst_cmp.get("per_access", {}).get(access, {}).get("feature_metrics", {})
-                for access in inst_cmp.get("accesses", [])
-            },
-            "overall_vector_similarity": {
-                access: inst_cmp.get("per_access", {}).get(access, {}).get("overall_vector", {})
-                for access in inst_cmp.get("accesses", [])
-            },
+            "ref_profile": str(sde_profile),
+            "test_profile": str(perf_profile),
+            "ref_features": {"all": sde_data},
+            "test_features": {"all": perf_data},
+            "overall_vector_similarity": {"all": data_cmp.get("overall_vector", {})},
         },
     }
     out_path.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -198,8 +146,6 @@ def warmup_cross_similarity(cases: list[Any], out_base: Path) -> tuple[Path, Pat
             spaces = [
                 ("data_ref", ba.get("data", {}).get("ref_features", {}).get("all", {}), bb.get("data", {}).get("ref_features", {}).get("all", {})),
                 ("data_test", ba.get("data", {}).get("test_features", {}).get("all", {}), bb.get("data", {}).get("test_features", {}).get("all", {})),
-                ("inst_ref", ba.get("inst", {}).get("ref_features", {}).get("all", {}), bb.get("inst", {}).get("ref_features", {}).get("all", {})),
-                ("inst_test", ba.get("inst", {}).get("test_features", {}).get("all", {}), bb.get("inst", {}).get("test_features", {}).get("all", {})),
             ]
             for space, fa, fb in spaces:
                 if not isinstance(fa, dict) or not isinstance(fb, dict) or not fa or not fb:

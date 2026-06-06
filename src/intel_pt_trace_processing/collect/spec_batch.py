@@ -36,6 +36,7 @@ from intel_pt_trace_processing.perf.stream import (
     add_perf_postprocess_args,
     validate_perf_postprocess_args,
 )
+from intel_pt_trace_processing.perf.selection import load_selection_sidecar
 from intel_pt_trace_processing.workloads.spec_runtime import (
     parse_run_list_entry,
 )
@@ -89,9 +90,7 @@ def print_case_ok(case: RunCase) -> None:
     # load_compare_metrics names overall block metrics data_all_overall_<k> (e.g. overall_score -> data_all_overall_overall_score).
     has_sde_compare = (
         "data_all_overall_score" in case.metrics
-        or "inst_all_overall_score" in case.metrics
         or "data_all_overall_overall_score" in case.metrics
-        or "inst_all_overall_overall_score" in case.metrics
     )
     if has_sde_compare:
         d_score = float(
@@ -99,39 +98,29 @@ def print_case_ok(case: RunCase) -> None:
                 "data_all_overall_overall_score", case.metrics.get("data_all_overall_score", 0.0)
             )
         )
-        i_score = float(
-            case.metrics.get(
-                "inst_all_overall_overall_score", case.metrics.get("inst_all_overall_score", 0.0)
-            )
-        )
         print(
             "  ok:",
             f"data_all_score={d_score:.4f}",
             f"data_all_r2={case.metrics.get('data_all_overall_r2', 0.0):.4f}",
             f"data_top3={case.metrics.get('data_all_overall_top3_dims', '')}",
-            f"inst_all_score={i_score:.4f}",
-            f"inst_all_r2={case.metrics.get('inst_all_overall_r2', 0.0):.4f}",
-            f"inst_top3={case.metrics.get('inst_all_overall_top3_dims', '')}",
             f"pt_aux_lost={case.metrics.get('perf_aux_lost', 0)}",
             f"pt_trace_err={case.metrics.get('perf_trace_errors', 0)}",
             f"portrait_insns={case.metrics.get('portrait_parsed_instructions', '')}",
-            f"merged={case.metrics.get('trace_profile_merged_json', '')}",
+            f"profile={case.metrics.get('trace_profile_json', '')}",
             f"out={case.out_dir}",
         )
         return
     extra = []
     if case.metrics.get("portrait_parsed_instructions") is not None:
         extra.append(f"portrait_insns={case.metrics.get('portrait_parsed_instructions')}")
-    if case.metrics.get("trace_profile_merged_json"):
-        extra.append(f"merged={case.metrics.get('trace_profile_merged_json')}")
+    if case.metrics.get("trace_profile_json"):
+        extra.append(f"profile={case.metrics.get('trace_profile_json')}")
     print(
         "  ok:",
         "mode=perf-only",
         f"perf_insn_lines={case.metrics.get('perf_insn_lines', 0)}",
         f"pt_aux_lost={case.metrics.get('perf_aux_lost', 0)}",
         f"pt_trace_err={case.metrics.get('perf_trace_errors', 0)}",
-        f"inst_analysis={case.metrics.get('perf_inst_analysis_json', '')}",
-        f"data_analysis={case.metrics.get('perf_data_analysis_json', '')}",
         *extra,
         f"out={case.out_dir}",
     )
@@ -282,6 +271,8 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
                     continue
             except OSError:
                 continue
+            if load_selection_sidecar(perf_path) is None:
+                continue
             try:
                 tag = perf_path.parent.parent.name
             except Exception:
@@ -342,11 +333,20 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
                             seq += 1
                             print(f"  skip trace: existing perf stat out={layout.out_dir}")
                             continue
-                    elif bool(getattr(args, "skip_existing", True)) and layout.perf_data_analysis_json.is_file() and layout.perf_inst_analysis_json.is_file():
-                        prepared_cases.append(PreparedCase(seq=seq, layout=layout))
-                        seq += 1
-                        print(f"  skip trace: existing analysis json out={layout.out_dir}")
-                        continue
+                    elif (
+                        bool(getattr(args, "skip_existing", True))
+                        and layout.perf_trace_profile_json.is_file()
+                        and load_selection_sidecar(layout.perf_data) is not None
+                    ):
+                        if bool(getattr(args, "enable_sde", False)) and not (
+                            layout.sde_trace_profile_json.is_file() or layout.sde_trace.is_file()
+                        ):
+                            pass
+                        else:
+                            prepared_cases.append(PreparedCase(seq=seq, layout=layout))
+                            seq += 1
+                            print(f"  skip trace: existing trace profile out={layout.out_dir}")
+                            continue
                     prepared = run_trace_phase(
                         seq=seq,
                         layout=layout,
@@ -586,7 +586,7 @@ def main() -> int:
         "--export-full-features",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="After run, export perf_full_features.(csv/xlsx) by concatenating recovered data features + portrait (+recover report).",
+        help="After run, export perf_full_features.(csv/xlsx) from trace_profile.json files.",
     )
     args = ap.parse_args()
     return run_spec_batch_main(args)

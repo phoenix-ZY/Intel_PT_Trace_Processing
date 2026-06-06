@@ -28,10 +28,20 @@ typedef struct {
     uint64_t branch_taken;
     uint64_t branch_not_taken;
     uint64_t branch_unknown_next_ip;
+    uint64_t cond_branch_known;
+    uint64_t cond_branch_taken;
+    uint64_t cond_branch_not_taken;
+    uint64_t cond_branch_unknown_next_ip;
+    uint64_t cond_branch_pattern_window;
+    uint64_t cond_branch_pattern_len;
     U64Map branch_site_taken;
     U64Map branch_site_not_taken;
     U64Map branch_site_last_outcome;
     U64Map branch_site_transitions;
+    U64Map branch_pattern4;
+    U64Map branch_pattern8;
+    U64Map branch_pattern16;
+    U64Map branch_pattern32;
     U64Map gpr_last_read;
     U64Map gpr_last_write;
     U64Map vec_last_read;
@@ -274,17 +284,52 @@ static uint64_t portrait_branch_target(const TraceInsn *insn, const xed_decoded_
     return (uint64_t)((int64_t)(insn->ip + insn->code_len) + disp);
 }
 
-static void portrait_add_branch_outcome(PortraitStats *stats, const TraceInsn *insn, const TraceInsn *next, uint64_t target) {
+static void portrait_add_cond_branch_pattern(PortraitStats *stats, bool taken) {
+    if (!stats) return;
+    stats->cond_branch_pattern_window = ((stats->cond_branch_pattern_window << 1) | (taken ? 1ULL : 0ULL));
+    if (stats->cond_branch_pattern_len < 32) stats->cond_branch_pattern_len++;
+    const unsigned int lens[4] = {4, 8, 16, 32};
+    U64Map *maps[4] = {
+        &stats->branch_pattern4,
+        &stats->branch_pattern8,
+        &stats->branch_pattern16,
+        &stats->branch_pattern32,
+    };
+    for (unsigned int i = 0; i < 4; i++) {
+        unsigned int len = lens[i];
+        if (stats->cond_branch_pattern_len < len) continue;
+        uint64_t mask = (len == 64) ? UINT64_MAX : ((1ULL << len) - 1ULL);
+        uint64_t key = stats->cond_branch_pattern_window & mask;
+        uint64_t cur = 0;
+        if (!map_get(maps[i], key, &cur)) cur = 0;
+        map_put(maps[i], key, cur + 1);
+    }
+}
+
+static void portrait_add_branch_outcome(
+    PortraitStats *stats,
+    const TraceInsn *insn,
+    const TraceInsn *next,
+    uint64_t target,
+    bool is_conditional
+) {
     if (!stats || !insn || target == 0) return;
     uint64_t site = mix64((((uint64_t)insn->tid) << 32) ^ insn->ip);
     if (!next || next->tid != insn->tid) {
         stats->branch_unknown_next_ip++;
+        if (is_conditional) stats->cond_branch_unknown_next_ip++;
         return;
     }
     bool taken = next->ip == target;
     stats->branch_known++;
     if (taken) stats->branch_taken++;
     else stats->branch_not_taken++;
+    if (is_conditional) {
+        stats->cond_branch_known++;
+        if (taken) stats->cond_branch_taken++;
+        else stats->cond_branch_not_taken++;
+        portrait_add_cond_branch_pattern(stats, taken);
+    }
 
     U64Map *site_map = taken ? &stats->branch_site_taken : &stats->branch_site_not_taken;
     uint64_t cur = 0;
@@ -446,7 +491,7 @@ static void portrait_add(PortraitStats *stats, const TraceInsn *insn, const Trac
     }
 
     if (category == XED_CATEGORY_COND_BR || category == XED_CATEGORY_UNCOND_BR || category == XED_CATEGORY_CALL) {
-        portrait_add_branch_outcome(stats, insn, next, branch_target);
+        portrait_add_branch_outcome(stats, insn, next, branch_target, category == XED_CATEGORY_COND_BR);
     }
 }
 
@@ -527,6 +572,47 @@ static uint64_t map_count_or_zero(const U64Map *m, uint64_t key) {
     return map_get(m, key, &v) ? v : 0;
 }
 
+static void pattern_stats(const U64Map *m, uint64_t *out_total, uint64_t *out_max, double *out_entropy) {
+    uint64_t total = 0;
+    uint64_t max_count = 0;
+    for (size_t i = 0; i < m->cap; i++) {
+        if (!m->used[i]) continue;
+        uint64_t count = m->vals[i];
+        total += count;
+        if (count > max_count) max_count = count;
+    }
+    double entropy = 0.0;
+    if (total > 0) {
+        for (size_t i = 0; i < m->cap; i++) {
+            if (!m->used[i]) continue;
+            double p = (double)m->vals[i] / (double)total;
+            if (p > 0.0) entropy -= p * log2(p);
+        }
+    }
+    if (out_total) *out_total = total;
+    if (out_max) *out_max = max_count;
+    if (out_entropy) *out_entropy = entropy;
+}
+
+static void write_branch_pattern_obj(FILE *out, const U64Map *m) {
+    uint64_t total = 0, max_count = 0;
+    double entropy = 0.0;
+    pattern_stats(m, &total, &max_count, &entropy);
+    double distinct_cap = (m->sz > 0 && m->sz <= 64) ? (double)m->sz : 64.0;
+    double entropy_norm = distinct_cap > 1.0 ? entropy / log2(distinct_cap) : 0.0;
+    if (entropy_norm > 1.0) entropy_norm = 1.0;
+    fprintf(
+        out,
+        "{\"samples\": %" PRIu64 ", \"distinct\": %zu, \"distinct_ratio\": %.12g, \"top_mass\": %.12g, \"entropy\": %.12g, \"entropy_norm\": %.12g}",
+        total,
+        m->sz,
+        total ? (double)m->sz / (double)total : 0.0,
+        total ? (double)max_count / (double)total : 0.0,
+        entropy,
+        entropy_norm
+    );
+}
+
 static void write_named_counter(FILE *out, const char *name, const uint64_t *counts, unsigned int n, const char *(*name_fn)(unsigned int)) {
     fprintf(out, "    \"%s\": {\"counts\": {", name);
     bool first = true;
@@ -570,10 +656,14 @@ static void write_dep_block(FILE *out, const PortraitStats *stats, const char *n
 
 static void write_branch_behavior(FILE *out, const PortraitStats *stats) {
     double taken_rate = stats->branch_known ? (double)stats->branch_taken / (double)stats->branch_known : 0.0;
+    double cond_taken_rate = stats->cond_branch_known ? (double)stats->cond_branch_taken / (double)stats->cond_branch_known : 0.0;
+    uint64_t outcome_total = stats->branch_known + stats->branch_unknown_next_ip;
+    double known_outcome_ratio = outcome_total ? (double)stats->branch_known / (double)outcome_total : 0.0;
     double site_weight = 0.0;
     double site_entropy_sum = 0.0;
     double site_transition_sum = 0.0;
     uint64_t sites_with_known = 0;
+    uint64_t hot_site_count = 0;
 
     for (size_t i = 0; i < stats->branch_site_taken.cap; i++) {
         if (!stats->branch_site_taken.used[i]) continue;
@@ -583,6 +673,7 @@ static void write_branch_behavior(FILE *out, const PortraitStats *stats) {
         uint64_t known = taken + not_taken;
         if (!known) continue;
         sites_with_known++;
+        if (known > hot_site_count) hot_site_count = known;
         double p = (double)taken / (double)known;
         double ent = h2(p);
         uint64_t transitions = map_count_or_zero(&stats->branch_site_transitions, key);
@@ -598,6 +689,7 @@ static void write_branch_behavior(FILE *out, const PortraitStats *stats) {
         uint64_t not_taken = stats->branch_site_not_taken.vals[i];
         if (!not_taken) continue;
         sites_with_known++;
+        if (not_taken > hot_site_count) hot_site_count = not_taken;
         site_weight += (double)not_taken;
         site_entropy_sum += 0.0;
         site_transition_sum += 0.0;
@@ -605,19 +697,32 @@ static void write_branch_behavior(FILE *out, const PortraitStats *stats) {
 
     fprintf(out,
         "    \"branch_behavior\": {\n"
-        "      \"global\": {\"known_total\": %" PRIu64 ", \"unknown_next_ip_total\": %" PRIu64 ", \"taken_total\": %" PRIu64 ", \"not_taken_total\": %" PRIu64 ", \"taken_rate\": %.12g, \"entropy\": %.12g},\n"
-        "      \"site_weighted\": {\"sites_with_known\": %" PRIu64 ", \"entropy_mean\": %.12g, \"transition_rate_mean\": %.12g}\n"
-        "    }",
+        "      \"global\": {\"known_total\": %" PRIu64 ", \"unknown_next_ip_total\": %" PRIu64 ", \"known_outcome_ratio\": %.12g, \"taken_total\": %" PRIu64 ", \"not_taken_total\": %" PRIu64 ", \"taken_rate\": %.12g, \"entropy\": %.12g, \"conditional_known_total\": %" PRIu64 ", \"conditional_unknown_next_ip_total\": %" PRIu64 ", \"conditional_taken_rate\": %.12g},\n"
+        "      \"site_weighted\": {\"sites_with_known\": %" PRIu64 ", \"hot_site_top_mass\": %.12g, \"entropy_mean\": %.12g, \"transition_rate_mean\": %.12g},\n"
+        "      \"patterns\": {\"4\": ",
         stats->branch_known,
         stats->branch_unknown_next_ip,
+        known_outcome_ratio,
         stats->branch_taken,
         stats->branch_not_taken,
         taken_rate,
         h2(taken_rate),
+        stats->cond_branch_known,
+        stats->cond_branch_unknown_next_ip,
+        cond_taken_rate,
         sites_with_known,
+        site_weight > 0.0 ? (double)hot_site_count / site_weight : 0.0,
         site_weight > 0.0 ? site_entropy_sum / site_weight : 0.0,
         site_weight > 0.0 ? site_transition_sum / site_weight : 0.0
     );
+    write_branch_pattern_obj(out, &stats->branch_pattern4);
+    fprintf(out, ", \"8\": ");
+    write_branch_pattern_obj(out, &stats->branch_pattern8);
+    fprintf(out, ", \"16\": ");
+    write_branch_pattern_obj(out, &stats->branch_pattern16);
+    fprintf(out, ", \"32\": ");
+    write_branch_pattern_obj(out, &stats->branch_pattern32);
+    fprintf(out, "}\n    }");
 }
 
 static void write_branch_summary(FILE *out, const PortraitStats *stats) {
@@ -766,7 +871,21 @@ static void write_combined_json(
     fprintf(out, "    \"rcx_soft_adjusted\": %" PRIu64 ",\n", ctx->rcx_soft_adjusted);
     fprintf(out, "    \"mvs_seeded_total\": %" PRIu64 ",\n", ctx->mvs_seeded_total);
     fprintf(out, "    \"mvs_seeded_indirect\": %" PRIu64 ",\n", ctx->mvs_seeded_indirect);
-    fprintf(out, "    \"mvs_seeded_normal\": %" PRIu64 "\n", ctx->mvs_seeded_normal);
+    fprintf(out, "    \"mvs_seeded_normal\": %" PRIu64 ",\n", ctx->mvs_seeded_normal);
+    fprintf(out, "    \"syscalls\": [\n");
+    bool first_syscall = true;
+    for (size_t i = 0; i < ctx->syscall_hist.cap; i++) {
+        if (!ctx->syscall_hist.used[i]) continue;
+        fprintf(
+            out,
+            "      %s{\"nr\": %" PRIu64 ", \"count\": %" PRIu64 "}\n",
+            first_syscall ? "" : ",",
+            ctx->syscall_hist.keys[i],
+            ctx->syscall_hist.vals[i]
+        );
+        first_syscall = false;
+    }
+    fprintf(out, "    ]\n");
     fprintf(out, "  },\n");
 
     fprintf(out, "  \"portrait\": {\n");
@@ -967,7 +1086,7 @@ int main(int argc, char **argv) {
     };
 
     TfProfile *inst_profile = tf_profile_create(false, opts.analysis_line_size, opts.analysis_stack_depth);
-    TfProfile *data_profile = tf_profile_create(false, opts.analysis_line_size, opts.analysis_stack_depth);
+    TfProfile *data_profile = tf_profile_create(true, opts.analysis_line_size, opts.analysis_stack_depth);
     if (!inst_profile || !data_profile) die("oom profile");
 
     Ctx ctx = {
@@ -1018,6 +1137,10 @@ int main(int argc, char **argv) {
     map_init(&portrait.branch_site_not_taken, 1 << 12);
     map_init(&portrait.branch_site_last_outcome, 1 << 12);
     map_init(&portrait.branch_site_transitions, 1 << 12);
+    map_init(&portrait.branch_pattern4, 1 << 8);
+    map_init(&portrait.branch_pattern8, 1 << 10);
+    map_init(&portrait.branch_pattern16, 1 << 12);
+    map_init(&portrait.branch_pattern32, 1 << 12);
     map_init(&portrait.gpr_last_read, 1 << 12);
     map_init(&portrait.gpr_last_write, 1 << 12);
     map_init(&portrait.vec_last_read, 1 << 12);
@@ -1155,6 +1278,10 @@ int main(int argc, char **argv) {
     map_free(&portrait.branch_site_not_taken);
     map_free(&portrait.branch_site_last_outcome);
     map_free(&portrait.branch_site_transitions);
+    map_free(&portrait.branch_pattern4);
+    map_free(&portrait.branch_pattern8);
+    map_free(&portrait.branch_pattern16);
+    map_free(&portrait.branch_pattern32);
     map_free(&portrait.gpr_last_read);
     map_free(&portrait.gpr_last_write);
     map_free(&portrait.vec_last_read);

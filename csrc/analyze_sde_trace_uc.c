@@ -262,7 +262,7 @@ int main(int argc, char **argv) {
         if (!inst_prof) die("oom inst profile");
     }
     if (o.data_analysis_path) {
-        data_prof = tf_profile_create(false, o.analysis_line_size, o.analysis_stack_depth);
+        data_prof = tf_profile_create(true, o.analysis_line_size, o.analysis_stack_depth);
         if (!data_prof) die("oom data profile");
     }
 

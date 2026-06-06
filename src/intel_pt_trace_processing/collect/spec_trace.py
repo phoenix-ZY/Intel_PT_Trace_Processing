@@ -12,6 +12,7 @@ from intel_pt_trace_processing.collect.perf_targets import PerfTarget, cpu_perf_
 from intel_pt_trace_processing.collect.perf_stats import parse_perf_stat_csv, parse_perf_stat_unsupported
 from intel_pt_trace_processing.collect.spec_layout import CaseLayout, PreparedCase, make_case_layout
 from intel_pt_trace_processing.core.commands import run_step
+from intel_pt_trace_processing.perf.selection import load_selection_sidecar, write_selection_sidecar
 from intel_pt_trace_processing.workloads.spec import build_spec_shell_command
 from intel_pt_trace_processing.workloads.spec_runtime import (
     cleanup_pid,
@@ -233,6 +234,9 @@ def run_trace_phase(
     time.sleep(1.0)
     if perf_launcher.poll() is not None:
         raise RuntimeError("perf phase launcher failed to start")
+    perf_root_pid = pick_spec_benchmark_pid(perf_launcher.pid, run_dir, exe_basename, resolve_timeout=8.0)
+    if not pid_alive(perf_root_pid):
+        raise RuntimeError("cannot resolve live benchmark pid for perf phase")
     if layout.warmup > 0:
         time.sleep(layout.warmup)
     if perf_launcher.poll() is not None:
@@ -284,6 +288,15 @@ def run_trace_phase(
                 verbose=args.verbose,
                 stderr_path=layout.perf_record_stderr,
             )
+            write_selection_sidecar(
+                layout.perf_data,
+                {
+                    "mode": "process_tree",
+                    "root_pid": perf_root_pid,
+                    "include_descendants": True,
+                    "bench": layout.bench,
+                },
+            )
     finally:
         terminate_process(perf_launcher)
     if not layout.perf_data.exists() or layout.perf_data.stat().st_size == 0:
@@ -320,6 +333,7 @@ def run_trace_phase_perf_stream(
         raise RuntimeError("--perf-stream-max-samples must be >= 0")
 
     cmd_line = extract_cmd_line(spec_root, run_dir)
+    exe_basename = Path(shlex.split(cmd_line)[0]).name
 
     # Put the benchmark stdout/stderr into a stable location (not per-sample).
     stream_dir = args.output_base / bench / "_stream"
@@ -346,6 +360,9 @@ def run_trace_phase_perf_stream(
     time.sleep(1.0)
     if launcher.poll() is not None:
         raise RuntimeError("perf stream launcher failed to start")
+    perf_root_pid = pick_spec_benchmark_pid(launcher.pid, run_dir, exe_basename, resolve_timeout=8.0)
+    if not pid_alive(perf_root_pid):
+        raise RuntimeError("cannot resolve live benchmark pid for perf stream")
     collect_mode = str(getattr(args, "collect_mode", "pt"))
 
     prepared: list[PreparedCase] = []
@@ -385,7 +402,12 @@ def run_trace_phase_perf_stream(
                     sample_idx += 1
                     next_at += interval
                     continue
-            elif bool(getattr(args, "skip_existing", True)) and layout.perf_data.is_file() and layout.perf_data.stat().st_size > 0:
+            elif (
+                bool(getattr(args, "skip_existing", True))
+                and layout.perf_data.is_file()
+                and layout.perf_data.stat().st_size > 0
+                and load_selection_sidecar(layout.perf_data) is not None
+            ):
                 # Resume-friendly: if perf.data already exists for this timestamped case dir,
                 # do not record again; just schedule post phase (which will also reuse existing outputs).
                 prepared.append(PreparedCase(seq=seq_base + sample_idx, layout=layout))
@@ -428,6 +450,16 @@ def run_trace_phase_perf_stream(
                         ),
                         verbose=args.verbose,
                         stderr_path=layout.perf_record_stderr,
+                    )
+                    write_selection_sidecar(
+                        layout.perf_data,
+                        {
+                            "mode": "process_tree",
+                            "root_pid": perf_root_pid,
+                            "include_descendants": True,
+                            "bench": bench,
+                            "sample_time_seconds": next_at,
+                        },
                     )
             except Exception:
                 # Common race: benchmark exits between the alive check and perf record.

@@ -267,11 +267,9 @@ def bundle_to_flat_row(br: BundleRow) -> dict[str, Any]:
         "stride_bin_cap_lines": b.get("stride_bin_cap_lines", ""),
         "data_ref_path": b.get("data", {}).get("ref_path", ""),
         "data_test_path": b.get("data", {}).get("test_path", ""),
-        "inst_ref_path": b.get("inst", {}).get("ref_path", ""),
-        "inst_test_path": b.get("inst", {}).get("test_path", ""),
     }
 
-    for kind in ("data", "inst"):
+    for kind in ("data",):
         block = b.get(kind, {})
         if not isinstance(block, dict):
             continue
@@ -458,8 +456,6 @@ def main() -> int:
             "stride_bin_cap_lines",
             "data_ref_path",
             "data_test_path",
-            "inst_ref_path",
-            "inst_test_path",
         ]
         all_keys: set[str] = set()
         for r in flat_rows:
@@ -552,4 +548,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

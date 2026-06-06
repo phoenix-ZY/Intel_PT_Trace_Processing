@@ -6,7 +6,9 @@ import os
 import shutil
 from pathlib import Path
 
+from intel_pt_trace_processing.collect.cloud_perf_collect import verify_buildid_cache
 from intel_pt_trace_processing.perf.stream import process_perf_stream
+from intel_pt_trace_processing.perf.selection import load_selection_sidecar
 from intel_pt_trace_processing.workloads.cloud_runtime import log
 
 def iter_perf_data_files(output_dir: Path, bench_name: str) -> list[tuple[int, Path]]:
@@ -22,7 +24,7 @@ def iter_perf_data_files(output_dir: Path, bench_name: str) -> list[tuple[int, P
     return out
 
 def cloud_postprocess_reports_complete(output_dir: Path, bench_name: str) -> bool:
-    """True if every perf sample under output_dir has stream-processor analysis JSONs in report/."""
+    """True if every perf sample under output_dir has a trace profile in report/."""
     samples = iter_perf_data_files(output_dir, bench_name)
     if not samples:
         return False
@@ -30,10 +32,19 @@ def cloud_postprocess_reports_complete(output_dir: Path, bench_name: str) -> boo
     report_dir = output_dir / bench_name / "report"
     if not report_dir.is_dir():
         return False
-    for idx, _ in samples:
-        data_json = report_dir / f"{slug}_s{idx}.perf.recovered.data.analysis.json"
-        inst_json = report_dir / f"{slug}_s{idx}.perf.inst.analysis.json"
-        if not data_json.is_file() or not inst_json.is_file():
+    for idx, perf_data in samples:
+        selection = load_selection_sidecar(perf_data)
+        if selection is None:
+            return False
+        profile_json = report_dir / f"{slug}_s{idx}.trace_profile.json"
+        if not profile_json.is_file() or profile_json.stat().st_size == 0:
+            return False
+        try:
+            profile = json.loads(profile_json.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        metadata = profile.get("metadata", {}) if isinstance(profile, dict) else {}
+        if not isinstance(metadata, dict) or metadata.get("trace_selection") != selection:
             return False
     return True
 
@@ -71,23 +82,33 @@ def cloud_run_perf_postprocess(
     for sample_idx, perf_data in data_files:
         prefix = f"{slug}_s{sample_idx}"
         perf_data_copy = intermediate / f"{prefix}.perf.data"
-        perf_data_analysis = report_dir / f"{prefix}.perf.recovered.data.analysis.json"
-        perf_inst_analysis = report_dir / f"{prefix}.perf.inst.analysis.json"
-        perf_insn_portrait_json = report_dir / f"{prefix}.insn.portrait.json"
+        trace_profile_json = report_dir / f"{prefix}.trace_profile.json"
 
         want_portrait = bool(getattr(args, "insn_portrait", True))
-        have_portrait_json = perf_insn_portrait_json.is_file() and perf_insn_portrait_json.stat().st_size > 0
-        have_recover_outputs = (
-            perf_data_analysis.is_file()
-            and perf_data_analysis.stat().st_size > 0
-            and perf_inst_analysis.is_file()
-            and perf_inst_analysis.stat().st_size > 0
-        )
+        selection = load_selection_sidecar(perf_data)
+        if selection is None:
+            raise RuntimeError(f"missing trace selection metadata for {perf_data}")
+        if not bool(selection.get("buildid_cache_verified", False)):
+            raise RuntimeError(f"build-id cache was not verified for {perf_data}")
+        command_prefix = tuple(str(x) for x in selection.get("perf_command_prefix", []))
 
-        # If recover+analysis already exist, skip unless we still need to generate portrait JSON.
-        if have_recover_outputs and (not want_portrait or have_portrait_json):
-            log("⏭️", f"Sample {sample_idx}: recovered analysis already exists; skipping perf decode/recover.")
-            continue
+        if trace_profile_json.is_file() and trace_profile_json.stat().st_size > 0:
+            try:
+                profile = json.loads(trace_profile_json.read_text(encoding="utf-8", errors="replace"))
+            except (OSError, json.JSONDecodeError):
+                profile = {}
+            metadata = profile.get("metadata", {}) if isinstance(profile, dict) else {}
+            if selection is None or (
+                isinstance(metadata, dict) and metadata.get("trace_selection") == selection
+            ):
+                log("⏭️", f"Sample {sample_idx}: trace profile already exists; skipping perf decode.")
+                continue
+
+        verify_buildid_cache(
+            perf_tool=perf_tool,
+            perf_data=perf_data,
+            command_prefix=command_prefix,
+        )
 
         # "Extract perf.data" step for cloud: copy into intermediate (skip if already present).
         if not (perf_data_copy.is_file() and perf_data_copy.stat().st_size > 0):
@@ -115,25 +136,16 @@ def cloud_run_perf_postprocess(
             split_crossline=args.split_crossline,
             rcx_soft_threshold=args.rcx_soft_threshold,
             verbose=args.verbose_post,
-        )
-        trace_profile_merged_json = report_dir / f"{prefix}.trace_profile.merged.json"
-        merged = result.profile
-        merged.update(
-            {
+            perf_command_prefix=command_prefix,
+            metadata={
                 "bench": bench_name,
                 "sample_index": sample_idx,
-                "paths": {
-                    "perf_data_copy": str(perf_data_copy),
-                    "perf_data_analysis_json": str(result.data_analysis_json),
-                    "perf_inst_analysis_json": str(result.inst_analysis_json),
-                    "insn_portrait_json": str(result.portrait_json),
-                    "stream_profile_json": str(result.combined_json),
-                },
-            }
+                "buildid_cache_verified": True,
+                **({"trace_selection": selection} if selection is not None else {}),
+            },
         )
-        trace_profile_merged_json.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
         log(
             "✅",
-            f"Sample {sample_idx}: data={result.data_analysis_json.name} inst={result.inst_analysis_json.name} "
+            f"Sample {sample_idx}: profile={result.trace_profile_json.name} "
             f"(pt_aux_lost={result.aux_lost}, pt_trace_err={result.trace_errors})",
         )

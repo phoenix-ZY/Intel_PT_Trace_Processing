@@ -1292,7 +1292,7 @@ int main(int argc, char **argv) {
         if (!inst_profile) die("oom inst profile");
     }
     if (o.data_analysis_path) {
-        ctx.data_profile = tf_profile_create(false, o.analysis_line_size, o.analysis_stack_depth);
+        ctx.data_profile = tf_profile_create(true, o.analysis_line_size, o.analysis_stack_depth);
         if (!ctx.data_profile) die("oom data profile");
     }
     uc_hook hh1, hh2, hh3, hh4, hh5;

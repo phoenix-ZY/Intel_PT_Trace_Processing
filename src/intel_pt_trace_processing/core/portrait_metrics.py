@@ -31,8 +31,16 @@ def flatten_portrait_metrics(report: dict, *, prefix: str = "portrait_") -> dict
             out[f"{prefix}branch_taken_entropy"] = float(g["entropy"])
         if isinstance(g.get("unknown_next_ip_total"), (int, float)):
             out[f"{prefix}branch_unknown_next_ip_total"] = int(g["unknown_next_ip_total"])
+        if isinstance(g.get("known_outcome_ratio"), (int, float)):
+            out[f"{prefix}branch_known_outcome_ratio"] = float(g["known_outcome_ratio"])
+        if isinstance(g.get("conditional_taken_rate"), (int, float)):
+            out[f"{prefix}branch_conditional_taken_rate"] = float(g["conditional_taken_rate"])
     sw = bb.get("site_weighted", {}) if isinstance(bb, dict) else {}
     if isinstance(sw, dict):
+        if isinstance(sw.get("sites_with_known"), (int, float)):
+            out[f"{prefix}branch_sites_with_known"] = int(sw["sites_with_known"])
+        if isinstance(sw.get("hot_site_top_mass"), (int, float)):
+            out[f"{prefix}branch_hot_site_top_mass"] = float(sw["hot_site_top_mass"])
         if isinstance(sw.get("entropy_mean"), (int, float)):
             out[f"{prefix}branch_site_entropy_mean"] = float(sw["entropy_mean"])
         if isinstance(sw.get("transition_rate_mean"), (int, float)):
@@ -42,12 +50,12 @@ def flatten_portrait_metrics(report: dict, *, prefix: str = "portrait_") -> dict
         for length, pobj in pats.items():
             if not isinstance(pobj, dict):
                 continue
-            if isinstance(pobj.get("distinct"), (int, float)):
-                out[f"{prefix}branch_pat{length}_distinct"] = int(pobj["distinct"])
+            if isinstance(pobj.get("distinct_ratio"), (int, float)):
+                out[f"{prefix}branch_pat{length}_distinct_ratio"] = float(pobj["distinct_ratio"])
             if isinstance(pobj.get("top_mass"), (int, float)):
                 out[f"{prefix}branch_pat{length}_top_mass"] = float(pobj["top_mass"])
-            if isinstance(pobj.get("entropy"), (int, float)):
-                out[f"{prefix}branch_pat{length}_entropy"] = float(pobj["entropy"])
+            if isinstance(pobj.get("entropy_norm"), (int, float)):
+                out[f"{prefix}branch_pat{length}_entropy_norm"] = float(pobj["entropy_norm"])
     sc = report.get("syscall", {})
     if "per_1000_insns" in sc:
         out[f"{prefix}syscall_per_1k"] = float(sc["per_1000_insns"])

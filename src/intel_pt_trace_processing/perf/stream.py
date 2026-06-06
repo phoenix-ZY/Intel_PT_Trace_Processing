@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
+
+from intel_pt_trace_processing.core.features import build_trace_profile, load_json_object, write_trace_profile
+from intel_pt_trace_processing.perf.selection import discover_process_tree_pids
 
 
 @dataclass
@@ -14,30 +16,13 @@ class PerfStreamResult:
     aux_lost: int
     trace_errors: int
     insn_lines: int
-    combined_json: Path
-    data_analysis_json: Path
-    inst_analysis_json: Path
-    recover_report_json: Path
-    portrait_json: Path
+    trace_profile_json: Path
     perf_script_stderr: Path
     processor_stderr: Path
 
     @property
     def profile(self) -> dict[str, Any]:
-        return load_json_object(self.combined_json)
-
-
-def load_json_object(path: str | Path | None) -> dict[str, Any]:
-    if path is None:
-        return {}
-    p = Path(path)
-    if not p.is_file():
-        return {}
-    try:
-        obj = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return obj if isinstance(obj, dict) else {}
+        return load_json_object(self.trace_profile_json)
 
 
 def parse_perf_script_health(stderr_path: Path) -> tuple[int, int]:
@@ -95,14 +80,8 @@ def validate_perf_processor_args(args: argparse.Namespace) -> None:
         raise SystemExit("--rcx-soft-threshold must be >= 0")
 
 
-# Backward-compatible helper names for collector scripts during the migration.
 add_perf_postprocess_args = add_perf_processor_args
 validate_perf_postprocess_args = validate_perf_processor_args
-
-
-def _write_json(path: Path, obj: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj if obj is not None else {}, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _perf_locate_args(symfs_dir: str | Path | None, target_pid: str | None) -> list[str]:
@@ -141,6 +120,9 @@ def process_perf_stream(
     rcx_soft_threshold: int = 128,
     symfs_dir: str | Path | None = None,
     target_pid: str | None = None,
+    target_pid_include_descendants: bool = True,
+    perf_command_prefix: Sequence[str] = (),
+    metadata: dict[str, Any] | None = None,
 ) -> PerfStreamResult:
     processor_bin = script_dir / "trace_feature_processor"
     if not processor_bin.exists():
@@ -149,19 +131,44 @@ def process_perf_stream(
     intermediate_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
 
-    combined_json = report_dir / f"{prefix}.trace_profile.stream.json"
-    perf_data_analysis = report_dir / f"{prefix}.perf.recovered.data.analysis.json"
-    perf_inst_analysis = report_dir / f"{prefix}.perf.inst.analysis.json"
-    perf_recover_report = report_dir / f"{prefix}.perf.recover.report.json"
-    perf_portrait_json = report_dir / f"{prefix}.insn.portrait.json"
+    processor_json = intermediate_dir / f"{prefix}.trace_profile.processor.json"
+    trace_profile_json = report_dir / f"{prefix}.trace_profile.json"
     perf_script_stderr = report_dir / f"{prefix}.perf.script.stderr.txt"
     processor_stderr = report_dir / f"{prefix}.trace_feature_processor.stderr.txt"
 
+    selected_pid = target_pid
+    effective_metadata = dict(metadata or {})
+    if target_pid:
+        if target_pid_include_descendants:
+            try:
+                root_pid = int(target_pid)
+            except ValueError as exc:
+                raise ValueError("target_pid must be one integer when descendant filtering is enabled") from exc
+            selected_pids = discover_process_tree_pids(
+                perf_tool=perf_tool,
+                perf_data=perf_data,
+                root_pid=root_pid,
+            )
+            selected_pid = ",".join(str(pid) for pid in selected_pids)
+            effective_metadata["trace_selection"] = {
+                "mode": "process_tree",
+                "root_pid": root_pid,
+                "selected_pids": selected_pids,
+                "include_descendants": True,
+            }
+        else:
+            effective_metadata["trace_selection"] = {
+                "mode": "pid",
+                "selected_pids": [int(pid) for pid in str(target_pid).split(",") if pid],
+                "include_descendants": False,
+            }
+
     perf_cmd = [
+        *perf_command_prefix,
         str(perf_tool),
         "script",
         "-f",
-        *_perf_locate_args(symfs_dir, target_pid),
+        *_perf_locate_args(symfs_dir, selected_pid),
         "--insn-trace",
         "-F",
         "tid,cpu,time,ip,insn,ipc",
@@ -171,7 +178,7 @@ def process_perf_stream(
     processor_cmd = [
         str(processor_bin),
         "--out",
-        str(combined_json),
+        str(processor_json),
         "--max-insns",
         str(perf_max_insn_lines),
         "--progress-every",
@@ -223,35 +230,49 @@ def process_perf_stream(
                 pass
 
     aux_lost, trace_errors = parse_perf_script_health(perf_script_stderr)
-    profile = load_json_object(combined_json)
-    health = profile.get("health", {}) if isinstance(profile, dict) else {}
+    processor_profile = load_json_object(processor_json)
+    health = processor_profile.get("health", {}) if isinstance(processor_profile, dict) else {}
     insn_lines = int(health.get("parsed_lines", 0) or 0) if isinstance(health, dict) else 0
 
-    if proc_rc != 0:
+    if proc_rc != 0 and insn_lines < 1:
         raise RuntimeError(f"trace_feature_processor failed with exit code {proc_rc}; see {processor_stderr}")
     if perf_rc not in (0, 130, 141, -13) and insn_lines < 1:
         raise RuntimeError(f"perf script failed with exit code {perf_rc}; see {perf_script_stderr}")
     if insn_lines < 1:
         raise RuntimeError(f"no perf insn lines processed (aux_lost={aux_lost}, trace_errors={trace_errors})")
 
-    _write_json(perf_data_analysis, profile.get("data_locality", {}))
-    _write_json(perf_inst_analysis, profile.get("inst_locality", {}))
-    _write_json(perf_recover_report, profile.get("recover", {}))
-    if insn_portrait:
-        portrait_obj = profile.get("portrait", {})
-    else:
-        portrait_obj = {}
-    _write_json(perf_portrait_json, portrait_obj)
+    portrait_obj = processor_profile.get("portrait", {}) if insn_portrait else {}
+    profile = build_trace_profile(
+        source_kind="perf",
+        source_path=perf_data,
+        prefix=prefix,
+        data_locality=processor_profile.get("data_locality", {}),
+        inst_locality=processor_profile.get("inst_locality", {}),
+        insn_portrait=portrait_obj if isinstance(portrait_obj, dict) else None,
+        recover_report=processor_profile.get("recover", {}),
+        health={
+            "aux_lost": aux_lost,
+            "trace_errors": trace_errors,
+            "insn_lines": insn_lines,
+            "perf_script_returncode": perf_rc,
+            "processor_returncode": proc_rc,
+            **(health if isinstance(health, dict) else {}),
+        },
+        artifacts={
+            "perf_data": perf_data,
+            "processor_profile_json": processor_json,
+            "perf_script_stderr": perf_script_stderr,
+            "processor_stderr": processor_stderr,
+        },
+        metadata=effective_metadata,
+    )
+    write_trace_profile(trace_profile_json, profile)
 
     return PerfStreamResult(
         aux_lost=aux_lost,
         trace_errors=trace_errors,
         insn_lines=insn_lines,
-        combined_json=combined_json,
-        data_analysis_json=perf_data_analysis,
-        inst_analysis_json=perf_inst_analysis,
-        recover_report_json=perf_recover_report,
-        portrait_json=perf_portrait_json,
+        trace_profile_json=trace_profile_json,
         perf_script_stderr=perf_script_stderr,
         processor_stderr=processor_stderr,
     )

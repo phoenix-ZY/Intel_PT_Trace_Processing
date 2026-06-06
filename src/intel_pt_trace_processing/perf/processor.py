@@ -5,9 +5,9 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from intel_pt_trace_processing.core.features import build_trace_profile
+from intel_pt_trace_processing.core.features import load_json_object
 from intel_pt_trace_processing.perf.stream import process_perf_stream
 
 
@@ -20,6 +20,8 @@ class PerfProcessingConfig:
 
     symfs_dir: str | Path | None = None
     target_pid: str | None = None
+    target_pid_include_descendants: bool = True
+    perf_command_prefix: Sequence[str] = ()
 
     recover_mvs: str = "on"
     recover_fill_seed: int = 1
@@ -119,37 +121,17 @@ def process_perf_data(
             verbose=cfg.verbose,
             symfs_dir=cfg.symfs_dir,
             target_pid=cfg.target_pid,
+            target_pid_include_descendants=cfg.target_pid_include_descendants,
+            perf_command_prefix=cfg.perf_command_prefix,
+            metadata=metadata,
         )
-        stream_profile = stream_result.profile
-        portrait_features = stream_profile.get("portrait") if cfg.insn_portrait else None
-
         artifacts: dict[str, Path | None] = {
             "work_dir": base_dir,
-            "stream_profile_json": stream_result.combined_json,
-            "data_analysis_json": stream_result.data_analysis_json,
-            "instruction_analysis_json": stream_result.inst_analysis_json,
-            "recover_report_json": stream_result.recover_report_json,
-            "portrait_json": stream_result.portrait_json,
+            "trace_profile_json": stream_result.trace_profile_json,
             "perf_script_stderr": stream_result.perf_script_stderr,
             "processor_stderr": stream_result.processor_stderr,
         }
-        profile = build_trace_profile(
-            source_kind="perf",
-            source_path=perf_data_path,
-            prefix=prefix,
-            data_locality=stream_profile.get("data_locality", {}),
-            inst_locality=stream_profile.get("inst_locality", {}),
-            insn_portrait=portrait_features if isinstance(portrait_features, dict) else None,
-            recover_report=stream_profile.get("recover", {}),
-            health={
-                "aux_lost": stream_result.aux_lost,
-                "trace_errors": stream_result.trace_errors,
-                "insn_lines": stream_result.insn_lines,
-                **(stream_profile.get("health", {}) if isinstance(stream_profile.get("health"), dict) else {}),
-            },
-            artifacts=artifacts,
-            metadata=metadata,
-        )
+        profile = load_json_object(stream_result.trace_profile_json)
         return PerfProcessingResult(profile=profile, paths=artifacts)
     finally:
         if owns_work_dir and not keep_intermediate:

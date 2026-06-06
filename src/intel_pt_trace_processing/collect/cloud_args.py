@@ -59,6 +59,12 @@ def build_cloud_arg_parser() -> argparse.ArgumentParser:
         help=f"Path to perf binary (default: {DEFAULT_PERF_TOOL})",
     )
     parser.add_argument(
+        "--sudo-perf",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Run perf record/stat/script and build-id cache checks through sudo",
+    )
+    parser.add_argument(
         "--interval",
         type=float,
         default=DEFAULT_INTERVAL,
@@ -96,9 +102,15 @@ def build_cloud_arg_parser() -> argparse.ArgumentParser:
         help="Run only a specific service (default: all)",
     )
     parser.add_argument(
+        "--config-name",
+        type=str,
+        default=None,
+        help="Run only this config_name within the selected service",
+    )
+    parser.add_argument(
         "--no-post-process",
         action="store_true",
-        help="Skip perf script / trace_feature_processor after each config",
+        help="Skip batch perf script / trace_feature_processor after collection",
     )
     parser.add_argument(
         "--stop-on-post-error",
@@ -106,21 +118,10 @@ def build_cloud_arg_parser() -> argparse.ArgumentParser:
         help="Abort the whole run if post-processing fails for one config",
     )
     parser.add_argument(
-        "--post-process-mode",
-        type=str,
-        choices=["inline", "batch"],
-        default="batch",
-        help=(
-            "When to run post-processing. "
-            "'inline': after each config finishes collecting. "
-            "'batch' (default): collect all perf.data first, then post-process benches in parallel via --post-workers."
-        ),
-    )
-    parser.add_argument(
         "--post-workers",
         type=int,
         default=8,
-        help="number of workers for batch post-processing (default: 8)",
+        help="Parallel perf-script post-processing workers after all collection finishes",
     )
     parser.add_argument(
         "--verbose-post",
@@ -231,4 +232,6 @@ def parse_cloud_args(argv: list[str] | None = None) -> argparse.Namespace:
     except ValueError as e:
         sys.exit(f"❌ --perf-mmap-pages: {e}")
     validate_perf_postprocess_args(args)
+    if args.post_workers <= 0:
+        sys.exit("--post-workers must be > 0")
     return args

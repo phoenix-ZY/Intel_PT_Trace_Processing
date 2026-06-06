@@ -5,6 +5,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 
 @dataclass(frozen=True)
@@ -58,24 +59,19 @@ def perf_record_cmd(
     target: PerfTarget,
     duration_s: float,
     quiet: bool = False,
+    cgroup: str | None = None,
+    command_prefix: Sequence[str] = (),
 ) -> list[str]:
-    cmd = [str(perf_tool), "record"]
+    cmd = [*command_prefix, str(perf_tool), "record"]
     if quiet:
         cmd.append("-q")
-    cmd.extend(
-        [
-            "-m",
-            str(mmap_pages),
-            "-e",
-            event,
-            "-o",
-            str(output),
-            *target.args(),
-            "--",
-            "sleep",
-            str(duration_s),
-        ]
-    )
+    cmd.extend(["-m", str(mmap_pages), "-e", event, "-o", str(output)])
+    if cgroup:
+        cmd.append("-a")
+    cmd.extend(target.args())
+    if cgroup:
+        cmd.extend(["-G", cgroup])
+    cmd.extend(["--", "sleep", str(duration_s)])
     return cmd
 
 
@@ -85,19 +81,25 @@ def perf_stat_cmd(
     events: str,
     target: PerfTarget,
     duration_s: float,
+    cgroup: str | None = None,
+    command_prefix: Sequence[str] = (),
 ) -> list[str]:
-    return [
+    cmd = [
+        *command_prefix,
         str(perf_tool),
         "stat",
         "-x",
         ",",
         "-e",
         events,
-        *target.args(),
-        "--",
-        "sleep",
-        str(duration_s),
     ]
+    if cgroup:
+        cmd.append("-a")
+    cmd.extend(target.args())
+    if cgroup:
+        cmd.extend(["-G", cgroup])
+    cmd.extend(["--", "sleep", str(duration_s)])
+    return cmd
 
 
 def write_perf_stat_json(
@@ -139,6 +141,8 @@ def run_perf_stat(
     parse_metrics,
     parse_unsupported,
     extra: dict | None = None,
+    cgroup: str | None = None,
+    command_prefix: Sequence[str] = (),
 ) -> tuple[int, int]:
     out_txt.parent.mkdir(parents=True, exist_ok=True)
     out_json.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +152,8 @@ def run_perf_stat(
             events=events,
             target=target,
             duration_s=duration_s,
+            cgroup=cgroup,
+            command_prefix=command_prefix,
         ),
         capture_output=True,
         text=True,

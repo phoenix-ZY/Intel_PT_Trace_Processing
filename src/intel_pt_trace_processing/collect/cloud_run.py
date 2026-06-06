@@ -8,15 +8,16 @@ from pathlib import Path
 from intel_pt_trace_processing.collect.cloud_perf_collect import collect_traces_for_config
 from intel_pt_trace_processing.collect.cloud_postprocess import (
     cloud_postprocess_reports_complete,
-    cloud_run_perf_postprocess,
     iter_perf_data_files,
 )
 from intel_pt_trace_processing.collect.perf_targets import cpu_perf_target
+from intel_pt_trace_processing.perf.selection import load_selection_sidecar
 from intel_pt_trace_processing.workloads.cloud import docker_cpuset_arg
 from intel_pt_trace_processing.workloads.cloud_runtime import (
     SERVICE_IPS,
     docker_exec,
     docker_inspect_pid,
+    docker_perf_event_cgroup,
     docker_run,
     docker_stop_rm,
     log,
@@ -43,10 +44,8 @@ def run_single_config(
     max_samples: int,
     warmup_duration: int = DEFAULT_WARMUP_DURATION,
     cli_args: argparse.Namespace | None = None,
-    *,
-    inline_postprocess: bool = True,
 ):
-    """Run one service config: optional PT capture, then perf script + feature extraction."""
+    """Run one service config and collect its perf samples."""
     service_type = config["service_type"]
     config_name = config["config_name"]
     container_name = config["container_name"]
@@ -69,16 +68,19 @@ def run_single_config(
     existing_n = len(existing_samples)
     has_perf = existing_n > 0
     post_complete = cloud_postprocess_reports_complete(output_dir, bench_name)
-    # Do not skip re-collection when perf.data is left over from a failed decode/recover run.
-    skip_collect = has_perf and post_complete and existing_n >= max_samples
+    selections_verified = has_perf and all(
+        bool((load_selection_sidecar(path) or {}).get("buildid_cache_verified", False))
+        for _, path in existing_samples
+    )
+    skip_collect = has_perf and selections_verified and existing_n >= max_samples
     if skip_collect:
         log(
             "⏭️",
-            f"Skipping {bench_name} trace collection (perf + analysis already complete: samples={existing_n})",
+            f"Skipping {bench_name} trace collection (verified perf samples={existing_n})",
         )
     else:
-        if has_perf and not post_complete:
-            log("♻️", f"{bench_name}: perf.data exists but analysis missing — re-collecting PT")
+        if has_perf and not selections_verified:
+            log("♻️", f"{bench_name}: perf.data cache ownership is unverified — re-collecting PT")
         elif has_perf and post_complete and existing_n < max_samples:
             log(
                 "➕",
@@ -225,7 +227,33 @@ def run_single_config(
 
         perf_target = cpu_perf_target(int(getattr(cli_args, "perf_cpu", 6) if cli_args is not None else 6))
         monitor_pid = main_pid
-        log("🚀", f"Tracing CPU {perf_target.cpu} with perf -C (container main PID {main_pid})")
+        use_sudo_perf = bool(getattr(cli_args, "sudo_perf", False)) if cli_args is not None else False
+        try:
+            Path(f"/proc/{main_pid}/maps").read_text(encoding="utf-8", errors="replace")
+            maps_readable = True
+        except (OSError, PermissionError):
+            maps_readable = False
+        if not maps_readable and not use_sudo_perf:
+            log(
+                "❌",
+                f"Cannot read /proc/{main_pid}/maps; rerun with --sudo-perf so perf can record container mmap data",
+            )
+            bench_process.kill()
+            bench_process.wait()
+            docker_stop_rm(container_name)
+            return
+        perf_cgroup = docker_perf_event_cgroup(main_pid)
+        if perf_cgroup is None:
+            log("❌", f"Cannot resolve perf_event cgroup for {container_name} (PID {main_pid})")
+            bench_process.kill()
+            bench_process.wait()
+            docker_stop_rm(container_name)
+            return
+        log(
+            "🚀",
+            f"Tracing CPU {perf_target.cpu} with perf -C -G {perf_cgroup} "
+            f"(container main PID {main_pid})",
+        )
 
         if monitor_pid is not None and not pid_alive(monitor_pid):
             log("⚠️", "Perf monitor target is not alive — skipping.")
@@ -245,43 +273,31 @@ def run_single_config(
             else 0
         )
         pt_event = f"intel_pt/cyc,noretcomp={nrc}/u"
-        sample_count = collect_traces_for_config(
-            perf_tool=perf_tool,
-            bench_name=bench_name,
-            perf_target=perf_target,
-            monitor_pid=monitor_pid,
-            output_dir=output_dir,
-            interval=interval,
-            record_duration=record_duration,
-            max_samples=max_samples,
-            bench_process=bench_process,
-            perf_mmap_pages=mmap_pages,
-            intel_pt_event=pt_event,
-            collect_mode=str(getattr(cli_args, "collect_mode", "pt")) if cli_args is not None else "pt",
-            perf_stat_events=str(getattr(cli_args, "perf_stat_events", "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults")) if cli_args is not None else "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults",
-            start_index=existing_n if (has_perf and post_complete and existing_n < max_samples) else 0,
-        )
-
-        # ── Cleanup ───────────────────────────────────────────────────────
-        bench_process.kill()
-        bench_process.wait()
-        docker_stop_rm(container_name)
-        if config.get("needs_nginx_backend"):
-            docker_stop_rm("target-nginx-helper")
+        try:
+            sample_count = collect_traces_for_config(
+                perf_tool=perf_tool,
+                bench_name=bench_name,
+                perf_target=perf_target,
+                monitor_pid=monitor_pid,
+                output_dir=output_dir,
+                interval=interval,
+                record_duration=record_duration,
+                max_samples=max_samples,
+                bench_process=bench_process,
+                perf_mmap_pages=mmap_pages,
+                intel_pt_event=pt_event,
+                perf_cgroup=perf_cgroup,
+                perf_command_prefix=("sudo", "-n") if use_sudo_perf else (),
+                collect_mode=str(getattr(cli_args, "collect_mode", "pt")) if cli_args is not None else "pt",
+                perf_stat_events=str(getattr(cli_args, "perf_stat_events", "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults")) if cli_args is not None else "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults",
+                start_index=existing_n if (has_perf and selections_verified and existing_n < max_samples) else 0,
+            )
+        finally:
+            if bench_process.poll() is None:
+                bench_process.kill()
+            bench_process.wait()
+            docker_stop_rm(container_name)
+            if config.get("needs_nginx_backend"):
+                docker_stop_rm("target-nginx-helper")
 
         log("✅", f"{bench_name} done — {sample_count} samples collected.\n")
-
-    if inline_postprocess and cli_args is not None and not cli_args.no_post_process:
-        if iter_perf_data_files(output_dir, bench_name):
-            try:
-                cloud_run_perf_postprocess(
-                    script_dir=SCRIPT_DIR,
-                    output_dir=output_dir,
-                    bench_name=bench_name,
-                    perf_tool=perf_tool,
-                    args=cli_args,
-                )
-            except Exception as e:
-                log("❌", f"Post-process failed for {bench_name}: {e}")
-                if cli_args.stop_on_post_error:
-                    raise

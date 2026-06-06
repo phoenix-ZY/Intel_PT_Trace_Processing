@@ -3,13 +3,21 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from intel_pt_trace_processing.collect.spec_layout import PreparedCase, RunCase, make_case_layout
 from intel_pt_trace_processing.collect.spec_trace import run_trace_phase
 from intel_pt_trace_processing.compare.similarity import load_compare_metrics, maybe_write_feature_bundle
 from intel_pt_trace_processing.core.commands import run_step
-from intel_pt_trace_processing.core.portrait_metrics import flatten_portrait_metrics
+from intel_pt_trace_processing.core.features import (
+    build_trace_profile,
+    health_view,
+    load_json_object,
+    write_trace_profile,
+)
+from intel_pt_trace_processing.tools.flatten import flatten_trace_profile
+from intel_pt_trace_processing.perf.selection import load_selection_sidecar
 from intel_pt_trace_processing.perf.stream import process_perf_stream
 
 def run_one_case(
@@ -80,45 +88,69 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
             return False
 
     want_portrait = bool(getattr(args, "insn_portrait", False))
+    selection = load_selection_sidecar(layout.perf_data)
+    if selection is None:
+        raise RuntimeError(f"missing trace selection metadata for {layout.perf_data}")
+    target_pid = None
+    if selection and selection.get("mode") == "process_tree":
+        root_pid = selection.get("root_pid")
+        if isinstance(root_pid, int) and root_pid > 0:
+            target_pid = str(root_pid)
 
-    # Fast path: reuse existing perf post-process artifacts if present.
-    # IMPORTANT: if portrait is requested but portrait JSON is missing, do NOT return here;
-    # the one-pass stream processor should refresh the full perf feature set.
+    def _profile_healthy(path: Path) -> bool:
+        if not _nonempty(path):
+            return False
+        profile = load_json_object(path)
+        health = health_view(profile)
+        if isinstance(health, dict) and int(health.get("insn_lines", health.get("parsed_lines", 0)) or 0) > 0:
+            return True
+        features = profile.get("features", {})
+        return isinstance(features, dict) and bool(features.get("data_memory"))
+
+    def _profile_selection_matches(path: Path) -> bool:
+        if target_pid is None:
+            return True
+        profile = load_json_object(path)
+        metadata = profile.get("metadata", {}) if isinstance(profile, dict) else {}
+        actual = metadata.get("trace_selection", {}) if isinstance(metadata, dict) else {}
+        return isinstance(actual, dict) and actual.get("root_pid") == int(target_pid)
+
     if (
         skip_existing
-        and _nonempty(layout.perf_data_analysis_json)
-        and _nonempty(layout.perf_inst_analysis_json)
-        and (not want_portrait or _nonempty(layout.insn_portrait_json))
+        and _profile_healthy(layout.perf_trace_profile_json)
+        and _profile_selection_matches(layout.perf_trace_profile_json)
     ):
-        metrics: dict = {"mode": "reuse_existing"}
-        metrics["perf_inst_analysis_json"] = str(layout.perf_inst_analysis_json)
-        metrics["perf_data_analysis_json"] = str(layout.perf_data_analysis_json)
-        # Reuse portrait metrics if requested and available.
-        if getattr(args, "insn_portrait", False) and _nonempty(layout.insn_portrait_json):
-            try:
-                rep = json.loads(layout.insn_portrait_json.read_text(encoding="utf-8"))
-                metrics.update(flatten_portrait_metrics(rep))
-                metrics["perf_insn_portrait_json"] = str(layout.insn_portrait_json)
-                metrics["trace_profile_merged_json"] = str(layout.trace_profile_merged_json)
-            except Exception:
-                pass
-        return RunCase(
-            bench=layout.bench,
-            warmup=layout.warmup,
-            status="ok",
-            out_dir=str(layout.out_dir),
-            metrics=metrics,
-        )
+        sde_ready = not args.enable_sde or _nonempty(layout.sde_trace_profile_json)
+        compare_ready = not args.enable_sde or _nonempty(layout.data_sim_json)
+        if sde_ready and compare_ready:
+            profile = load_json_object(layout.perf_trace_profile_json)
+            metrics: dict = {
+                "mode": "reuse_existing",
+                "trace_profile_json": str(layout.perf_trace_profile_json),
+            }
+            health = health_view(profile)
+            if isinstance(health, dict):
+                metrics["perf_insn_lines"] = int(health.get("insn_lines", health.get("parsed_lines", 0)) or 0)
+                metrics["perf_aux_lost"] = int(health.get("aux_lost", 0) or 0)
+                metrics["perf_trace_errors"] = int(health.get("trace_errors", 0) or 0)
+            if want_portrait:
+                metrics.update(flatten_trace_profile(profile))
+            if args.enable_sde:
+                metrics.update(load_compare_metrics(layout.data_sim_json, metric_prefix="data_"))
+                metrics["sde_trace_profile_json"] = str(layout.sde_trace_profile_json)
+            return RunCase(
+                bench=layout.bench,
+                warmup=layout.warmup,
+                status="ok",
+                out_dir=str(layout.out_dir),
+                metrics=metrics,
+            )
 
     if args.enable_sde:
         sde_analyzer = script_dir / "analyze_sde_trace_uc"
         if not sde_analyzer.exists():
             raise RuntimeError(f"missing {sde_analyzer}; run build_recover_mem_addrs_uc.sh first")
-        need_sde_analyze = not (
-            layout.sde_insn.exists()
-            and layout.sde_inst_analysis_json.exists()
-            and layout.sde_data_analysis_json.exists()
-        )
+        need_sde_analyze = not _nonempty(layout.sde_trace_profile_json)
         if need_sde_analyze:
             run_step(
                 [
@@ -127,8 +159,6 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
                     str(layout.sde_trace),
                     "--insn-out",
                     str(layout.sde_insn),
-                    "--inst-analysis-out",
-                    str(layout.sde_inst_analysis_json),
                     "--data-analysis-out",
                     str(layout.sde_data_analysis_json),
                     "--analysis-line-size",
@@ -144,6 +174,23 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
                 ],
                 verbose=args.verbose,
             )
+            sde_profile = build_trace_profile(
+                source_kind="sde",
+                source_path=layout.sde_trace,
+                prefix=layout.prefix,
+                data_locality=load_json_object(layout.sde_data_analysis_json),
+                inst_locality=None,
+                insn_portrait=None,
+                recover_report=None,
+                health={},
+                artifacts={
+                    "sde_trace": layout.sde_trace,
+                    "instruction_trace": layout.sde_insn,
+                    "data_analysis_json": layout.sde_data_analysis_json,
+                },
+                metadata={"bench": layout.bench, "warmup_seconds": layout.warmup},
+            )
+            write_trace_profile(layout.sde_trace_profile_json, sde_profile)
     perf_result = process_perf_stream(
         script_dir=script_dir,
         perf_tool="perf",
@@ -165,20 +212,25 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
         split_crossline=args.split_crossline,
         rcx_soft_threshold=args.rcx_soft_threshold,
         verbose=args.verbose,
+        target_pid=target_pid,
+        target_pid_include_descendants=True,
+        metadata={"bench": layout.bench, "warmup_seconds": layout.warmup},
     )
 
     metrics = {}
     if args.enable_sde:
-        if not layout.sde_data_analysis_json.exists() or not layout.sde_inst_analysis_json.exists():
-            raise RuntimeError("analyze_sde_trace_uc did not produce SDE analysis JSON outputs")
+        if not layout.sde_trace_profile_json.exists():
+            raise RuntimeError("SDE analysis did not produce trace_profile.json")
         run_step(
             [
                 sys.executable,
                 str(script_dir / "scripts/tools/compare_mem_trace_metrics.py"),
-                "--ref-analysis",
-                str(layout.sde_data_analysis_json),
-                "--test-analysis",
-                str(layout.perf_data_analysis_json),
+                "--ref-profile",
+                str(layout.sde_trace_profile_json),
+                "--test-profile",
+                str(perf_result.trace_profile_json),
+                "--memory",
+                "data",
                 "--top-k",
                 str(max(1, args.stride_top_k)),
                 "--max-error-bins",
@@ -190,74 +242,27 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
             ],
             verbose=args.verbose,
         )
-        run_step(
-            [
-                sys.executable,
-                str(script_dir / "scripts/tools/compare_mem_trace_metrics.py"),
-                "--ref-analysis",
-                str(layout.sde_inst_analysis_json),
-                "--test-analysis",
-                str(layout.perf_inst_analysis_json),
-                "--top-k",
-                str(max(1, args.stride_top_k)),
-                "--max-error-bins",
-                "20",
-                "--sdp-max-lines",
-                "262144",
-                "--json-out",
-                str(layout.inst_sim_json),
-            ],
-            verbose=args.verbose,
-        )
         metrics.update(load_compare_metrics(layout.data_sim_json, metric_prefix="data_"))
-        metrics.update(load_compare_metrics(layout.inst_sim_json, metric_prefix="inst_"))
         if args.write_feature_bundle:
             maybe_write_feature_bundle(
                 out_path=layout.feature_bundle_json,
-                sde_data_analysis=layout.sde_data_analysis_json,
-                sde_inst_analysis=layout.sde_inst_analysis_json,
-                perf_data_analysis=layout.perf_data_analysis_json,
-                perf_inst_analysis=layout.perf_inst_analysis_json,
+                sde_profile=layout.sde_trace_profile_json,
+                perf_profile=perf_result.trace_profile_json,
                 data_compare=layout.data_sim_json,
-                inst_compare=layout.inst_sim_json,
             )
     else:
         metrics["mode"] = "perf_only"
-        metrics["perf_inst_analysis_json"] = str(layout.perf_inst_analysis_json)
-        metrics["perf_data_analysis_json"] = str(layout.perf_data_analysis_json)
+        metrics["trace_profile_json"] = str(perf_result.trace_profile_json)
     metrics["perf_insn_lines"] = perf_result.insn_lines
     metrics["perf_aux_lost"] = perf_result.aux_lost
     metrics["perf_trace_errors"] = perf_result.trace_errors
 
-    if getattr(args, "insn_portrait", False) and _nonempty(perf_result.portrait_json):
-        rep = json.loads(perf_result.portrait_json.read_text(encoding="utf-8"))
-        metrics.update(flatten_portrait_metrics(rep))
-        metrics["perf_insn_portrait_json"] = str(perf_result.portrait_json)
+    perf_profile = perf_result.profile
+    if getattr(args, "insn_portrait", False):
+        metrics.update(flatten_trace_profile(perf_profile))
 
-    merged = perf_result.profile
-    merged.update(
-        {
-            "bench": layout.bench,
-            "warmup_seconds": layout.warmup,
-            "paths": {
-                "perf_data": str(layout.perf_data),
-                "perf_data_analysis_json": str(perf_result.data_analysis_json),
-                "perf_inst_analysis_json": str(perf_result.inst_analysis_json),
-                "insn_portrait_json": str(perf_result.portrait_json),
-                "stream_profile_json": str(perf_result.combined_json),
-            },
-        }
-    )
+    metrics["trace_profile_json"] = str(perf_result.trace_profile_json)
     if args.enable_sde:
-        merged["paths"].update(
-            {
-                "sde_data_analysis_json": str(layout.sde_data_analysis_json),
-                "sde_inst_analysis_json": str(layout.sde_inst_analysis_json),
-                "data_compare_json": str(layout.data_sim_json),
-                "inst_compare_json": str(layout.inst_sim_json),
-            }
-        )
-    layout.trace_profile_merged_json.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
-    metrics["trace_profile_merged_json"] = str(layout.trace_profile_merged_json)
+        metrics["sde_trace_profile_json"] = str(layout.sde_trace_profile_json)
 
     return RunCase(bench=layout.bench, warmup=layout.warmup, status="ok", out_dir=str(layout.out_dir), metrics=metrics)

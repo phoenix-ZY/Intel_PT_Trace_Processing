@@ -7,7 +7,7 @@ delegates to the refactored core package under ``src/intel_pt_trace_processing``
 
 Main path:
 
-    perf.data -> perf script --insn-trace -> instruction processing -> trace-profile-v1 JSON
+    perf.data -> perf script --insn-trace -> instruction processing -> trace-profile-v2 JSON
 
 The API produces software features only. Hardware/microarchitecture parameters
 belong to downstream consumers.
@@ -26,10 +26,8 @@ if str(_SRC_DIR) not in sys.path:
 
 from intel_pt_trace_processing.perf.processor import PerfProcessingConfig, process_perf_data
 
-SCHEMA_VERSION = "trace-profile-v1"
+SCHEMA_VERSION = "trace-profile-v2"
 
-# Backward-compatible public name. Existing callers can keep importing
-# FeatureExtractionConfig from this module.
 FeatureExtractionConfig = PerfProcessingConfig
 
 
@@ -44,16 +42,18 @@ def extract_software_features(
     """
     Extract software features from a single Intel PT ``perf.data`` file.
 
-    Returns a ``trace-profile-v1`` dictionary. The normalized surface is:
+    Returns a ``trace-profile-v2`` dictionary. The normalized feature surface is:
 
+      - ``features.instruction_mix``
       - ``features.data_memory``
       - ``features.instruction_memory``
-      - ``features.instruction_portrait``
-      - ``features.recovery``
-      - ``health``
+      - ``features.branch``
+      - ``features.syscall``
+      - ``features.register_dependency``
+      - ``features.ipc``
 
-    Legacy top-level keys such as ``data_locality`` and ``inst_locality`` are
-    still present for compatibility.
+    Runtime/debug information lives under ``metadata`` and should not be used
+    as downstream model features.
     """
     result = process_perf_data(
         perf_data,
@@ -108,6 +108,7 @@ def _build_cli_config(args: Any) -> FeatureExtractionConfig:
         verbose=args.verbose,
         symfs_dir=args.symfs_dir,
         target_pid=args.target_pid,
+        target_pid_include_descendants=args.pid_tree,
     )
 
 
@@ -138,7 +139,13 @@ def main() -> int:
         dest="target_pid",
         type=str,
         default=None,
-        help="Restrict decoding to this process id (perf --pid)",
+        help="Restrict decoding to this root process id",
+    )
+    parser.add_argument(
+        "--pid-tree",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include descendants discovered from perf task events (default: enabled)",
     )
     parser.add_argument("--line-size", type=int, default=64, help="Cache line size (power of two)")
     parser.add_argument("--perf-max-insn-lines", type=int, default=5_000_000)

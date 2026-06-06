@@ -36,30 +36,31 @@ Public API for downstream projects (recommended integration point):
 
 - `scripts/collect/run_cloud_perf_trace_analysis.py`
   - Runs typical cloud services and benchmark clients inside Docker
-  - Collection: target workload is pinned to one CPU/core; `perf record` uses Intel PT with `perf -C`
-  - Post-process: reuses `intel_pt_trace_processing.perf.stream.process_perf_stream`, producing analysis JSON in the same schema as SPEC perf-only
+  - Collection: target workload is pinned to one CPU/core; Intel PT uses
+    `perf -a -C CPU -G container-cgroup` so unrelated tasks on the core are excluded
+  - Post-process: verifies the sudo user's build-id cache, removes each target
+    container after collection, then decodes all benches in parallel into the
+    same canonical `trace-profile-v2` schema as SPEC perf-only
 
 - `csrc/analyze_sde_trace_uc.c`
   - Input: SDE debugtrace
   - Outputs (optional combinations):
     - `*.sde.insn.trace.txt`
     - `*.sde.data.analysis.json`
-    - `*.sde.inst.analysis.json`
 
 - `csrc/recover_mem_addrs_uc.c`
   - Input: perf instruction trace (`<tid> <time>: <ip> insn: <bytes...>`)
-  - Outputs:
+  - Low-level optional outputs:
     - `*.perf.recovered.data.analysis.json`
     - `*.perf.inst.analysis.json`
 
 - `csrc/trace_feature_processor.c`
   - Input: `perf script --insn-trace -F tid,cpu,time,ip,insn,ipc` stream on stdin.
-  - Output: one combined JSON containing `inst_locality`, `data_locality`, recover health,
-    and XED-based instruction portrait statistics.
+  - Output: one processor JSON consumed by Python and wrapped into canonical `trace-profile-v2`.
   - This is the default perf processing backend.
 
 - `src/intel_pt_trace_processing/perf/stream.py`
-  - Reusable perf-only post-processing layer: `perf.data -> perf script -> trace_feature_processor -> analysis JSON`
+  - Reusable perf-only post-processing layer: `perf.data -> perf script -> trace_feature_processor -> trace_profile.json`
   - Key functions:
     - `add_perf_processor_args()` / `validate_perf_processor_args()`
     - `process_perf_stream()`: returns aux_lost / trace_errors / insn_lines and output paths
@@ -71,11 +72,10 @@ Public API for downstream projects (recommended integration point):
     - `extract_software_features(perf_data, *, config=None, work_dir=None, ...) -> dict`
     - `extract_software_features_to_json(perf_data, output_json, ...) -> Path`
     - `FeatureExtractionConfig`: tuning knobs; defaults mirror `add_perf_postprocess_args()`
-  - Returns a `trace-profile-v1` dict: `data_locality`, `inst_locality`, `recover_report`,
-    optional `insn_portrait`, and processor `health` counters.
-  - New normalized consumers should read `features.data_memory`,
-    `features.instruction_memory`, `features.instruction_portrait`, and
-    `features.recovery`.
+  - Returns a `trace-profile-v2` dict with seven final feature groups:
+    `features.instruction_mix`, `features.data_memory`, `features.instruction_memory`,
+    `features.branch`, `features.syscall`, `features.register_dependency`, and
+    `features.ipc`. Source/artifact/health/recovery details live under `metadata`.
   - **Scope boundary**: produces *software* features only. It deliberately does NOT attach any
     hardware/microarchitecture parameters — that step belongs to the downstream consumer
     (e.g. ArchLens). Trace collection (`perf record`) and SDE validation are out of scope.
@@ -94,17 +94,17 @@ Public API for downstream projects (recommended integration point):
   - Used by both SDE and perf pipelines
 
 - `scripts/tools/compare_mem_trace_metrics.py`
-  - Input: two analysis JSON files (typically one from SDE, one from perf recovered)
+  - Input: two canonical trace profiles (`--ref-profile/--test-profile`)
   - Output: similarity metrics JSON (RD/SDP/stride, etc.)
 
 - `src/intel_pt_trace_processing/core/portrait_metrics.py`
   - Flattens the instruction portrait JSON emitted by `trace_feature_processor` for CSV/export consumers.
 
 - `scripts/tools/export_perf_full_features.py` / `scripts/tools/export_trace_features_to_excel.py`
-  - Aggregates `report/*.analysis.json` into CSV/XLSX (quick analysis/plotting)
+  - Aggregates `report/*.trace_profile.json` into CSV/XLSX
 
 - `src/intel_pt_trace_processing/tools/flatten.py`
-  - Generic `trace-profile-v1` flattener.
+  - Generic `trace-profile-v2` flattener.
   - Builds dynamic CSV columns from whatever the feature profile returns.
 
 - `scripts/tools/plot_data_feature_similarity.py`
@@ -121,12 +121,10 @@ Public API for downstream projects (recommended integration point):
   - `perf.data`, `*.perf.script.txt`, `*.perf.insn.trace.txt`, optional portrait temp files
 
 - `outputs/<spec_out>/<bench>/<warmup>/report`
-  - `*.sde.data.analysis.json`
-  - `*.sde.inst.analysis.json`
-  - `*.perf.recovered.data.analysis.json`
-  - `*.perf.inst.analysis.json`
+  - `*.trace_profile.json` (perf canonical profile)
+  - `*.sde.trace_profile.json` (only SDE vs perf)
   - `*.sde_vs_perf*.compare.json`
-  - `*.perf.script.stderr.txt` / `*.perf.recover.report.json` and other logs/health info
+  - `*.perf.script.stderr.txt` and other logs/health info
 
 ### Cloud (perf-only)
 
@@ -134,9 +132,7 @@ Public API for downstream projects (recommended integration point):
   - `*.perf.script.txt`, `*.perf.insn.trace.txt`, optional portrait temp files
 
 - `outputs/cloud_trace/<service>.<config>/report`
-  - `*.perf.recovered.data.analysis.json`
-  - `*.perf.inst.analysis.json`
-  - `*.insn.portrait.json` (if `--insn-portrait` is enabled)
+  - `*.trace_profile.json`
   - stderr/logs
 
 ## 3) Build and run

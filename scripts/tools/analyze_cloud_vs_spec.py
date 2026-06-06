@@ -28,21 +28,19 @@ NON_FEATURE_COLS = {
     "warmup_tag",
     "warmup_seconds",
     "access",
-    "data_analysis_json",
-    "inst_analysis_json",
-    "portrait_json",
+    "trace_profile_json",
 }
 
 
 FEATURE_FAMILIES: list[tuple[str, str]] = [
-    ("mix", r"^(mix_|mix_opmix_|mix_submix_)"),
-    ("data_locality", r"^(data_rd_prob::|data_stride_prob::|data_rd_entropy$|data_stride_entropy$|data_rd_local_mass_|data_stride_)"),
-    ("data_prefetch", r"^data_prefetch_"),
-    ("inst_locality", r"^(inst_rd_prob::|inst_stride_prob::|inst_rd_entropy$|inst_stride_entropy$|inst_rd_local_mass_|inst_stride_)"),
+    ("mix", r"^instruction_mix_"),
+    ("data_locality", r"^(data_memory_rd_prob::|data_memory_stride_prob::|data_memory_rd_entropy$|data_memory_stride_entropy$|data_memory_rd_local_mass_|data_memory_stride_|data_memory_cold_ratio$|data_memory_accesses_per_1k_insns$|data_memory_read_ratio$|data_memory_write_ratio$)"),
+    ("data_prefetch", r"^data_memory_prefetch_"),
+    ("inst_locality", r"^(instruction_memory_rd_prob::|instruction_memory_stride_prob::|instruction_memory_rd_entropy$|instruction_memory_stride_entropy$|instruction_memory_rd_local_mass_|instruction_memory_stride_|instruction_memory_cold_ratio$|instruction_memory_accesses_per_1k_insns$)"),
     ("branch", r"^branch_"),
     ("syscall", r"^syscall_"),
-    ("deps_scalar", r"^dep_(raw|war|waw)_"),
-    ("deps_vector", r"^dep_vec_"),
+    ("deps_scalar", r"^register_dependency_(raw|war|waw)_"),
+    ("deps_vector", r"^register_dependency_vec_"),
 ]
 
 

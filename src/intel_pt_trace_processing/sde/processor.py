@@ -18,7 +18,6 @@ class SdeProcessingConfig:
     analysis_stride_bin_cap_lines: int = 262144
     split_crossline: bool = True
     emit_instruction_trace: bool = False
-    emit_instruction_analysis: bool = False
     verbose: bool = False
 
     def validate(self) -> None:
@@ -72,7 +71,6 @@ def process_sde_debugtrace(
 
     data_analysis = report_dir / f"{prefix}.sde.data.analysis.json"
     insn_trace = intermediate_dir / f"{prefix}.sde.insn.trace.txt" if cfg.emit_instruction_trace else None
-    inst_analysis = report_dir / f"{prefix}.sde.inst.analysis.json" if cfg.emit_instruction_analysis else None
 
     cmd = [
         str(analyzer),
@@ -95,8 +93,6 @@ def process_sde_debugtrace(
     ]
     if insn_trace is not None:
         cmd += ["--insn-out", str(insn_trace)]
-    if inst_analysis is not None:
-        cmd += ["--inst-analysis-out", str(inst_analysis)]
 
     stderr_path = report_dir / f"{prefix}.sde.analyze.stderr.txt"
     run_step(cmd, verbose=cfg.verbose, stderr_path=stderr_path)
@@ -105,7 +101,6 @@ def process_sde_debugtrace(
         "work_dir": out_dir,
         "data_analysis_json": data_analysis,
         "instruction_trace": insn_trace,
-        "instruction_analysis_json": inst_analysis,
         "stderr": stderr_path,
     }
     profile = build_trace_profile(
@@ -113,7 +108,7 @@ def process_sde_debugtrace(
         source_path=trace_path,
         prefix=prefix,
         data_locality=load_json_object(data_analysis),
-        inst_locality=load_json_object(inst_analysis) if inst_analysis is not None else None,
+        inst_locality=None,
         insn_portrait=None,
         recover_report=None,
         health={},

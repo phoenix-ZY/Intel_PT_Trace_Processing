@@ -35,18 +35,14 @@ class CaseLayout:
     perf_stat_csv: Path
     perf_stat_json: Path
     perf_insn: Path
+    sde_trace_profile_json: Path
+    perf_trace_profile_json: Path
     sde_data_analysis_json: Path
-    perf_data_analysis_json: Path
     data_sim_json: Path
-    sde_inst_analysis_json: Path
-    perf_inst_analysis_json: Path
-    inst_sim_json: Path
     feature_bundle_json: Path
     sde_log: Path
     perf_portrait_txt: Path
     perf_portrait_stderr: Path
-    insn_portrait_json: Path
-    trace_profile_merged_json: Path
 
 @dataclass
 class PreparedCase:
@@ -79,16 +75,12 @@ def make_case_layout(*, bench: str, warmup_seconds: float, output_base: Path) ->
         perf_stat_csv=report_dir / f"{prefix}.perf.stat.csv",
         perf_stat_json=report_dir / f"{prefix}.perf.stat.json",
         perf_insn=intermediate_dir / f"{prefix}.perf.insn.trace.txt",
-        sde_data_analysis_json=report_dir / f"{prefix}.sde.data.analysis.json",
-        perf_data_analysis_json=report_dir / f"{prefix}.perf.recovered.data.analysis.json",
+        sde_trace_profile_json=report_dir / f"{prefix}.sde.trace_profile.json",
+        perf_trace_profile_json=report_dir / f"{prefix}.trace_profile.json",
+        sde_data_analysis_json=intermediate_dir / f"{prefix}.sde.data.analysis.json",
         data_sim_json=report_dir / f"{prefix}.sde_vs_perf_recovered.data.locality.compare.json",
-        sde_inst_analysis_json=report_dir / f"{prefix}.sde.inst.analysis.json",
-        perf_inst_analysis_json=report_dir / f"{prefix}.perf.inst.analysis.json",
-        inst_sim_json=report_dir / f"{prefix}.sde_vs_perf.inst.locality.compare.json",
         feature_bundle_json=report_dir / f"{prefix}.features.bundle.json",
         sde_log=report_dir / f"{prefix}.sde.attach.log",
         perf_portrait_txt=intermediate_dir / f"{prefix}.perf.insn.portrait.txt",
         perf_portrait_stderr=report_dir / f"{prefix}.perf.portrait.script.stderr.txt",
-        insn_portrait_json=report_dir / f"{prefix}.insn.portrait.json",
-        trace_profile_merged_json=report_dir / f"{prefix}.trace_profile.merged.json",
     )

@@ -1,12 +1,40 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
 
 from intel_pt_trace_processing.collect.perf_targets import PerfTarget, perf_record_cmd, run_perf_stat
 from intel_pt_trace_processing.collect.perf_stats import parse_perf_stat_csv, parse_perf_stat_unsupported
+from intel_pt_trace_processing.perf.selection import load_selection_sidecar, write_selection_sidecar
 from intel_pt_trace_processing.workloads.cloud_runtime import log, pid_alive, run_cmd
+
+
+def verify_buildid_cache(
+    *,
+    perf_tool: Path,
+    perf_data: Path,
+    command_prefix: tuple[str, ...],
+) -> None:
+    result = run_cmd(
+        [
+            *command_prefix,
+            str(perf_tool),
+            "buildid-cache",
+            "-f",
+            "-M",
+            str(perf_data),
+        ],
+        env={**os.environ, "PERF_PAGER": "cat"},
+    )
+    missing = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if result.returncode != 0 or missing:
+        detail = "; ".join(missing[:5])
+        if not detail:
+            detail = (result.stderr or "").strip().splitlines()[-1] if (result.stderr or "").strip() else "unknown error"
+        raise RuntimeError(f"build-id cache verification failed for {perf_data.name}: {detail}")
+
 
 def run_perf_stat_sample(
     *,
@@ -16,6 +44,8 @@ def run_perf_stat_sample(
     out_txt: Path,
     out_json: Path,
     events: str,
+    cgroup: str | None = None,
+    command_prefix: tuple[str, ...] = (),
 ) -> tuple[int, int]:
     """
     Run `perf stat` for a perf target for duration_s seconds.
@@ -30,6 +60,8 @@ def run_perf_stat_sample(
         events=events,
         parse_metrics=parse_perf_stat_csv,
         parse_unsupported=parse_perf_stat_unsupported,
+        cgroup=cgroup,
+        command_prefix=command_prefix,
     )
 
 def collect_traces_for_config(
@@ -44,6 +76,8 @@ def collect_traces_for_config(
     bench_process: subprocess.Popen,
     perf_mmap_pages: str,
     intel_pt_event: str,
+    perf_cgroup: str,
+    perf_command_prefix: tuple[str, ...] = (),
     *,
     collect_mode: str = "pt",  # "pt" | "stat"
     perf_stat_events: str = "cycles,instructions",
@@ -51,7 +85,7 @@ def collect_traces_for_config(
 ):
     """
     Periodically record PT traces from a perf target.
-    CPU/core mode uses `perf record -C CPU`; legacy modes use `-p PID` or `-t TID`.
+    Container mode uses `perf record -a -C CPU -G CGROUP`.
     Output files: perf.<bench_name>.<sample_index>.data
     """
     sample_count = int(start_index)
@@ -60,6 +94,7 @@ def collect_traces_for_config(
     log(
         "📊",
         f"Sampling perf target {perf_target.flag} {perf_target.cpu} every {interval}s "
+        f"in cgroup {perf_cgroup} "
         f"(target {max_samples} samples; starting at {sample_count})...",
     )
     if collect_mode == "pt":
@@ -99,6 +134,8 @@ def collect_traces_for_config(
                 out_txt=stat_txt,
                 out_json=stat_json,
                 events=perf_stat_events,
+                cgroup=perf_cgroup,
+                command_prefix=perf_command_prefix,
             )
             # perf stat exits 255 when any requested event is unsupported/not-counted,
             # but it still prints partial results. Treat 255 as non-fatal.
@@ -113,15 +150,26 @@ def collect_traces_for_config(
                 except OSError:
                     existing_sz = 0
                 if existing_sz > 0:
-                    log("⚠️", f"{pt_path.name} already exists ({existing_sz}B); skipping index {sample_count}")
-                    continue
-                # Empty file: treat as a failed prior record and re-collect.
-                try:
+                    existing_selection = load_selection_sidecar(pt_path)
+                    if (
+                        existing_selection is not None
+                        and existing_selection.get("cgroup") == perf_cgroup
+                        and existing_selection.get("root_pid") == monitor_pid
+                    ):
+                        log("⚠️", f"{pt_path.name} already exists ({existing_sz}B); skipping index {sample_count}")
+                        continue
+                    log("♻️", f"{pt_path.name} belongs to an older target; re-recording")
                     pt_path.unlink()
-                except FileNotFoundError:
-                    pass
-                log("♻️", f"{pt_path.name} exists but is 0B — deleting and re-recording")
+                else:
+                    # Empty file: treat as a failed prior record and re-collect.
+                    try:
+                        pt_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    log("♻️", f"{pt_path.name} exists but is 0B — deleting and re-recording")
 
+            # Keep ownership with the invoking user when perf itself runs through sudo.
+            pt_path.touch()
             pr = run_cmd(
                 perf_record_cmd(
                     perf_tool=perf_tool,
@@ -130,6 +178,8 @@ def collect_traces_for_config(
                     output=pt_path,
                     target=perf_target,
                     duration_s=record_duration,
+                    cgroup=perf_cgroup,
+                    command_prefix=perf_command_prefix,
                 )
             )
             # perf can fail (permissions, perf_event_paranoid, unsupported intel_pt) and still leave a 0B file.
@@ -156,6 +206,23 @@ def collect_traces_for_config(
                 log("💡", hint)
                 break
 
+            verify_buildid_cache(
+                perf_tool=perf_tool,
+                perf_data=pt_path,
+                command_prefix=perf_command_prefix,
+            )
+            write_selection_sidecar(
+                pt_path,
+                {
+                    "mode": "cgroup",
+                    "cgroup": perf_cgroup,
+                    "cpu": perf_target.cpu,
+                    "root_pid": monitor_pid,
+                    "bench": bench_name,
+                    "perf_command_prefix": list(perf_command_prefix),
+                    "buildid_cache_verified": True,
+                },
+            )
             log("✅", f"Sample {sample_count} @ {elapsed:.0f}s → {pt_path.name} ({out_sz}B)")
 
         # Wait for the next interval
