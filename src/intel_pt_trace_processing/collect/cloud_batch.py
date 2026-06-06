@@ -28,22 +28,28 @@ from intel_pt_trace_processing.collect.cloud_run import run_single_config
 from intel_pt_trace_processing.workloads.cloud_runtime import (
     BENCH_CONTAINER,
     NETWORK_NAME,
-    build_config_matrix,
     cleanup_all,
     docker_stop_rm,
     ensure_bench_client,
     ensure_network,
     ensure_static_files,
+    load_workload_config_file,
     log,
+    merge_config_matrix,
     run_cmd,
+    workload_container_names,
 )
 
 SCRIPT_DIR = REPO_ROOT
 
 
-def _services_to_run(service: str) -> list[str]:
+def _services_to_run(service: str, available_services: list[str]) -> list[str]:
     if service == "all":
-        return ["redis", "nginx", "haproxy", "postgres", "mysql", "memcached"]
+        return available_services
+    if service not in available_services:
+        sys.exit(
+            f"service {service!r} was not found. Available services: {', '.join(available_services)}"
+        )
     return [service]
 
 
@@ -80,13 +86,17 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    all_configs = load_workload_config_file(args.default_workload_config.resolve(), project_dir)
+    for config_path in args.workload_config:
+        extra_configs = load_workload_config_file(config_path.resolve(), project_dir)
+        merge_config_matrix(all_configs, extra_configs)
+
     ensure_static_files(project_dir)
-    cleanup_all()
+    cleanup_all(workload_container_names(all_configs))
     ensure_network()
     ensure_bench_client(project_dir, cpuset=args.bench_cpuset)
 
-    all_configs = build_config_matrix(project_dir, target_cpuset=args.target_cpuset)
-    services_to_run = _services_to_run(args.service)
+    services_to_run = _services_to_run(args.service, list(all_configs))
     if args.config_name:
         for service_name in services_to_run:
             all_configs[service_name] = [

@@ -12,6 +12,7 @@ from intel_pt_trace_processing.perf.stream import (
     add_perf_postprocess_args,
     validate_perf_postprocess_args,
 )
+from intel_pt_trace_processing.workloads.cloud_runtime import DEFAULT_WORKLOAD_CONFIG
 
 DEFAULT_OUTPUT_DIR = Path("/home/huangtianhao/Intel_PT_Trace_Processing/outputs/cloud_trace")
 DEFAULT_PERF_TOOL = Path("/usr/bin/perf")
@@ -98,8 +99,28 @@ def build_cloud_arg_parser() -> argparse.ArgumentParser:
         "--service",
         type=str,
         default="all",
-        choices=["all", "redis", "nginx", "haproxy", "postgres", "mysql", "memcached"],
-        help="Run only a specific service (default: all)",
+        help=(
+            "Run only a specific service (default: all services in the loaded workload config)."
+        ),
+    )
+    parser.add_argument(
+        "--default-workload-config",
+        type=Path,
+        default=DEFAULT_WORKLOAD_CONFIG,
+        help=f"Default JSON workload config file (default: {DEFAULT_WORKLOAD_CONFIG})",
+    )
+    parser.add_argument(
+        "--workload-config",
+        type=Path,
+        action="append",
+        default=[],
+        help="Additional JSON workload config file to merge/override. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--colocation-bench-suite-dir",
+        type=Path,
+        default=Path("/home/huangtianhao/colocation-bench-suite"),
+        help="Path used by feedsim/TaoBench command templates.",
     )
     parser.add_argument(
         "--config-name",

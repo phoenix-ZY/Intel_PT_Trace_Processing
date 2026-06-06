@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 import time
@@ -8,23 +9,24 @@ from pathlib import Path
 
 from intel_pt_trace_processing.workloads.cloud import docker_cpuset_arg
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_WORKLOAD_CONFIG = Path(
+    os.environ.get(
+        "CLOUD_WORKLOAD_CONFIG",
+        str(REPO_ROOT / "cloud_bench_configs" / "workloads.default.json"),
+    )
+)
 NETWORK_NAME = "perf-net"
 NETWORK_SUBNET = "172.30.0.0/24"
 NETWORK_GATEWAY = "172.30.0.1"
 BENCH_CONTAINER = "bench-client"
 BENCH_IP = "172.30.0.20"
 
-SERVICE_IPS = {
-    "redis": "172.30.0.10",
-    "nginx": "172.30.0.11",
-    "mysql": "172.30.0.12",
-    "memcached": "172.30.0.13",
-    "haproxy": "172.30.0.14",
-    "postgres": "172.30.0.16",
-}
+DOCKER_BENCH_CLIENT_IMAGE = os.environ.get(
+    "DOCKER_BENCH_CLIENT_IMAGE",
+    "local/bench-client-full:latest",
+)
 
-DOCKER_MYSQL_IMAGE = "mysql:8.0"
-DOCKER_MEMCACHED_IMAGE = "memcached:1.6"
 
 def log(icon: str, msg: str):
     print(f"  {icon}  {msg}", flush=True)
@@ -142,7 +144,7 @@ def ensure_network():
             NETWORK_NAME,
         ])
 
-def cleanup_all():
+def cleanup_all(extra_containers: list[str] | None = None):
     """Stop and remove all known containers and the network."""
     log("🧹", "Cleaning up old resources...")
     containers = [
@@ -152,9 +154,15 @@ def cleanup_all():
         "target-memcached",
         "target-haproxy",
         "target-postgres",
+        "target-feedsim",
+        "target-taobench-server",
         "target-nginx-helper",
+        "helper-taobench-loadgen",
         BENCH_CONTAINER,
     ]
+    for name in extra_containers or []:
+        if name not in containers:
+            containers.append(name)
     for name in containers:
         docker_stop_rm(name)
     run_cmd(["docker", "network", "rm", NETWORK_NAME])
@@ -172,7 +180,7 @@ def ensure_bench_client(project_dir: Path, *, cpuset: str | None = None):
         f"--ulimit nofile=655350:655350 "
         f"-v {project_dir}:/data "
         f"--entrypoint sleep "
-        f"local/bench-client-full:latest infinity"
+        f"{DOCKER_BENCH_CLIENT_IMAGE} infinity"
     )
     time.sleep(3)
 
@@ -217,343 +225,112 @@ def ensure_static_files(project_dir: Path):
         crt_data = (certs_dir / "server.crt").read_text()
         combined.write_text(crt_data + key_data)
 
+def normalize_cloud_config(config: dict, project_dir: Path) -> dict:
+    """Validate a JSON workload config and attach legacy access keys."""
+    for key in ("service_type", "config_name", "target_role", "load_cmd"):
+        if key not in config:
+            raise ValueError(f"workload config missing {key!r}: {config!r}")
+    target_role = config.get("target_role")
+    if not isinstance(target_role, dict):
+        raise ValueError(f"target_role must be an object: {config!r}")
+    for key in ("container_name", "start_cmd"):
+        if key not in target_role:
+            raise ValueError(f"target_role missing {key!r}: {config!r}")
+
+    config.setdefault("container_name", target_role["container_name"])
+    config.setdefault("server_cmd", target_role["start_cmd"])
+    config.setdefault("bench_cmd", config.get("load_cmd", ""))
+    config.setdefault("helper_roles", [])
+    config.setdefault("ready_checks", [])
+    config.setdefault("prepare_steps", [])
+    config.setdefault("startup_wait_s", 5)
+
+    if not isinstance(config["helper_roles"], list):
+        raise ValueError(f"helper_roles must be a list: {config!r}")
+    for helper in config["helper_roles"]:
+        if not isinstance(helper, dict):
+            raise ValueError(f"helper role must be an object: {config!r}")
+        for key in ("container_name", "start_cmd"):
+            if key not in helper:
+                raise ValueError(f"helper role missing {key!r}: {config!r}")
+    return config
+
+
+def normalize_cloud_config_matrix(matrix: dict[str, list[dict]], project_dir: Path) -> dict[str, list[dict]]:
+    for configs in matrix.values():
+        for config in configs:
+            normalize_cloud_config(config, project_dir)
+    return matrix
+
+
+def load_workload_config_file(path: Path, project_dir: Path) -> dict[str, list[dict]]:
+    """Load additional workload configs from JSON and normalize them like built-ins."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"failed to read workload config {path}: {exc}") from exc
+
+    if isinstance(payload, list):
+        workloads = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("workloads"), list):
+        workloads = payload["workloads"]
+    elif isinstance(payload, dict) and isinstance(payload.get("services"), dict):
+        matrix = payload["services"]
+        if not all(isinstance(v, list) for v in matrix.values()):
+            raise ValueError(f"workload config {path} services values must be lists")
+        return normalize_cloud_config_matrix(matrix, project_dir)
+    else:
+        raise ValueError(
+            f"workload config {path} must be a list, {{'workloads': [...]}} or {{'services': {{...}}}}"
+        )
+
+    matrix: dict[str, list[dict]] = {}
+    for idx, config in enumerate(workloads):
+        if not isinstance(config, dict):
+            raise ValueError(f"workload config {path} item {idx} is not an object")
+        for key in ("service_type", "config_name", "target_role", "load_cmd"):
+            if key not in config:
+                raise ValueError(f"workload config {path} item {idx} missing {key!r}")
+        matrix.setdefault(str(config["service_type"]), []).append(config)
+    return normalize_cloud_config_matrix(matrix, project_dir)
+
+
+def merge_config_matrix(base: dict[str, list[dict]], extra: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """Merge workload configs, replacing service.config_name on conflict."""
+    for service, configs in extra.items():
+        existing = {cfg["config_name"]: i for i, cfg in enumerate(base.get(service, []))}
+        if service not in base:
+            base[service] = []
+        for config in configs:
+            config_name = config["config_name"]
+            if config_name in existing:
+                base[service][existing[config_name]] = config
+            else:
+                base[service].append(config)
+                existing[config_name] = len(base[service]) - 1
+    return base
+
+
+def workload_container_names(matrix: dict[str, list[dict]]) -> list[str]:
+    names: list[str] = []
+    for configs in matrix.values():
+        for config in configs:
+            target_role = config.get("target_role", {})
+            for name in (config.get("container_name"), target_role.get("container_name")):
+                if name and name not in names:
+                    names.append(str(name))
+            for helper in config.get("helper_roles", []):
+                name = helper.get("container_name") if isinstance(helper, dict) else None
+                if name and name not in names:
+                    names.append(str(name))
+    return names
+
+
 def build_config_matrix(project_dir: Path, *, target_cpuset: str | None = None) -> dict[str, list[dict]]:
     """
-    One representative configuration per cloud service in the matrix.
+    Load the default cloud workload matrix from external JSON.
+
+    target_cpuset is accepted for backward compatibility; the JSON commands use
+    {target_cpuset} / {target_cpuset_arg} placeholders rendered at run time.
     """
-    nginx_conf = project_dir / "cloud_bench_configs" / "nginx-http.conf"
-    haproxy_cfg = project_dir / "cloud_bench_configs" / "haproxy-http.cfg"
-    cpuset_arg = docker_cpuset_arg(target_cpuset)
-
-    # Redis: vary persistence and load intensity.
-    redis_server_base = (
-        f"docker run -d --name target-redis "
-        f"{cpuset_arg}"
-        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['redis']} "
-        f"redis:7.2-alpine redis-server "
-    )
-    redis_bench_base = (
-        f"docker exec {BENCH_CONTAINER} memtier_benchmark "
-        f"-s {SERVICE_IPS['redis']} -p 6379 "
-    )
-    redis_configs = [
-        {
-            "config_name": "classic",
-            "server_cmd": redis_server_base + "--save '' --appendonly no",
-            "bench_cmd": redis_bench_base + "-c 50 --pipeline 32 --test-time {bench_duration}",
-            "container_name": "target-redis",
-            "service_type": "redis",
-            "bench_tool": "memtier_benchmark",
-        },
-        {
-            "config_name": "lowload",
-            "server_cmd": redis_server_base + "--save '' --appendonly no",
-            "bench_cmd": redis_bench_base + "-c 10 --pipeline 8 --test-time {bench_duration}",
-            "container_name": "target-redis",
-            "service_type": "redis",
-            "bench_tool": "memtier_benchmark",
-        },
-        {
-            "config_name": "highload",
-            "server_cmd": redis_server_base + "--save '' --appendonly no",
-            "bench_cmd": redis_bench_base + "-c 200 --pipeline 64 --test-time {bench_duration}",
-            "container_name": "target-redis",
-            "service_type": "redis",
-            "bench_tool": "memtier_benchmark",
-        },
-        {
-            "config_name": "aof",
-            "server_cmd": redis_server_base + "--save '' --appendonly yes --appendfsync everysec",
-            "bench_cmd": redis_bench_base + "-c 50 --pipeline 32 --test-time {bench_duration}",
-            "container_name": "target-redis",
-            "service_type": "redis",
-            "bench_tool": "memtier_benchmark",
-        },
-        {
-            "config_name": "maxmem256m",
-            "server_cmd": redis_server_base + "--save '' --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru",
-            "bench_cmd": redis_bench_base + "-c 50 --pipeline 32 --test-time {bench_duration}",
-            "container_name": "target-redis",
-            "service_type": "redis",
-            "bench_tool": "memtier_benchmark",
-        },
-    ]
-
-    # Nginx: vary worker count and request size/connection pressure.
-    nginx_server_base = (
-        f"docker run -d --name target-nginx "
-        f"{cpuset_arg}"
-        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['nginx']} "
-        f"-v {project_dir}/www:/usr/share/nginx/html:ro "
-        f"-v {nginx_conf}:/etc/nginx/nginx.conf:ro "
-        f"nginx:alpine "
-    )
-    nginx_configs = [
-        {
-            "config_name": "w1_small",
-            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=1 nginx:alpine "),
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 30 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/index.html",
-            "container_name": "target-nginx",
-            "service_type": "nginx",
-            "bench_tool": "wrk",
-        },
-        {
-            "config_name": "w4_small",
-            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=4 nginx:alpine "),
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 50 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/index.html",
-            "container_name": "target-nginx",
-            "service_type": "nginx",
-            "bench_tool": "wrk",
-        },
-        {
-            "config_name": "w8_small",
-            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=8 nginx:alpine "),
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t4 -c 200 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/index.html",
-            "container_name": "target-nginx",
-            "service_type": "nginx",
-            "bench_tool": "wrk",
-        },
-        {
-            "config_name": "w4_1k",
-            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=4 nginx:alpine "),
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 80 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/1k.bin",
-            "container_name": "target-nginx",
-            "service_type": "nginx",
-            "bench_tool": "wrk",
-        },
-        {
-            "config_name": "w4_64k",
-            "server_cmd": nginx_server_base.replace("nginx:alpine ", "-e NGINX_WORKER_PROCESSES=4 nginx:alpine "),
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 30 -d {{bench_duration}}s http://{SERVICE_IPS['nginx']}/64k.bin",
-            "container_name": "target-nginx",
-            "service_type": "nginx",
-            "bench_tool": "wrk",
-        },
-    ]
-
-    # HAProxy: vary concurrency and thread mode via env (config file may or may not use it; still changes runtime).
-    haproxy_server_base = (
-        f"docker run -d --name target-haproxy "
-        f"{cpuset_arg}"
-        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['haproxy']} "
-        f"-v {haproxy_cfg}:/usr/local/etc/haproxy/haproxy.cfg:ro "
-        f"haproxy:2.8"
-    )
-    haproxy_configs = [
-        {
-            "config_name": "lowconn",
-            "server_cmd": haproxy_server_base,
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 30 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/",
-            "container_name": "target-haproxy",
-            "service_type": "haproxy",
-            "bench_tool": "wrk",
-            "needs_nginx_backend": True,
-        },
-        {
-            "config_name": "classic",
-            "server_cmd": haproxy_server_base,
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 100 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/",
-            "container_name": "target-haproxy",
-            "service_type": "haproxy",
-            "bench_tool": "wrk",
-            "needs_nginx_backend": True,
-        },
-        {
-            "config_name": "highconn",
-            "server_cmd": haproxy_server_base,
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t4 -c 400 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/",
-            "container_name": "target-haproxy",
-            "service_type": "haproxy",
-            "bench_tool": "wrk",
-            "needs_nginx_backend": True,
-        },
-        {
-            "config_name": "shortreq",
-            "server_cmd": haproxy_server_base,
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 150 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/1k.bin",
-            "container_name": "target-haproxy",
-            "service_type": "haproxy",
-            "bench_tool": "wrk",
-            "needs_nginx_backend": True,
-        },
-        {
-            "config_name": "largereq",
-            "server_cmd": haproxy_server_base,
-            "bench_cmd": f"docker exec {BENCH_CONTAINER} wrk -t2 -c 50 -d {{bench_duration}}s http://{SERVICE_IPS['haproxy']}:9000/64k.bin",
-            "container_name": "target-haproxy",
-            "service_type": "haproxy",
-            "bench_tool": "wrk",
-            "needs_nginx_backend": True,
-        },
-    ]
-
-    # PostgreSQL: vary shared_buffers and client pressure.
-    pg_server = (
-        f"docker run -d --name target-postgres "
-        f"{cpuset_arg}"
-        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['postgres']} "
-        f"-e POSTGRES_PASSWORD=password "
-        f"postgres:15-alpine postgres "
-    )
-    postgres_configs = [
-        {
-            "config_name": "buf128_c2",
-            "server_cmd": pg_server + "-c shared_buffers=128MB",
-            "bench_cmd": f"docker exec target-postgres pgbench -c 2 -j 2 -T {{bench_duration}} -N -h localhost -U postgres postgres",
-            "container_name": "target-postgres",
-            "service_type": "postgres",
-            "bench_tool": "pgbench",
-            "needs_pgbench_init": True,
-        },
-        {
-            "config_name": "buf512_c4",
-            "server_cmd": pg_server + "-c shared_buffers=512MB",
-            "bench_cmd": f"docker exec target-postgres pgbench -c 4 -j 2 -T {{bench_duration}} -N -h localhost -U postgres postgres",
-            "container_name": "target-postgres",
-            "service_type": "postgres",
-            "bench_tool": "pgbench",
-            "needs_pgbench_init": True,
-        },
-        {
-            "config_name": "buf1g_c8",
-            "server_cmd": pg_server + "-c shared_buffers=1GB",
-            "bench_cmd": f"docker exec target-postgres pgbench -c 8 -j 4 -T {{bench_duration}} -N -h localhost -U postgres postgres",
-            "container_name": "target-postgres",
-            "service_type": "postgres",
-            "bench_tool": "pgbench",
-            "needs_pgbench_init": True,
-        },
-        {
-            "config_name": "ro_c8",
-            "server_cmd": pg_server + "-c shared_buffers=512MB",
-            "bench_cmd": f"docker exec target-postgres pgbench -c 8 -j 4 -T {{bench_duration}} -S -h localhost -U postgres postgres",
-            "container_name": "target-postgres",
-            "service_type": "postgres",
-            "bench_tool": "pgbench",
-            "needs_pgbench_init": True,
-        },
-        {
-            "config_name": "rw_c8",
-            "server_cmd": pg_server + "-c shared_buffers=512MB",
-            "bench_cmd": f"docker exec target-postgres pgbench -c 8 -j 4 -T {{bench_duration}} -h localhost -U postgres postgres",
-            "container_name": "target-postgres",
-            "service_type": "postgres",
-            "bench_tool": "pgbench",
-            "needs_pgbench_init": True,
-        },
-    ]
-
-    # MySQL: use sysbench from bench-client (time-based). The mysql:8.0 server image does not
-    # ship mysqlslap by default, which would make the load exit immediately and yield 0 samples.
-    # Prepare runs synchronously in run_single_config *before* the long-running bench Popen so that
-    # --warmup-duration applies only to oltp_read_write run, not overlapping prepare.
-    _sb_mysql_args = (
-        f"--db-driver=mysql --mysql-host={SERVICE_IPS['mysql']} --mysql-user=root "
-        f"--mysql-password=password --mysql-db=test --mysql-ssl=off "
-        f"--tables=8 --table-size=10000 --threads=16"
-    )
-    mysql_server_base = (
-        f"docker run -d --name target-mysql "
-        f"{cpuset_arg}"
-        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['mysql']} "
-        f"-e MYSQL_ROOT_PASSWORD=password "
-        f"-e MYSQL_DATABASE=test "
-        f"{DOCKER_MYSQL_IMAGE} "
-    )
-    mysql_cfgs = [
-        ("buf256m_t8", "--innodb-buffer-pool-size=256M", "--threads=8"),
-        ("buf256m_t32", "--innodb-buffer-pool-size=256M", "--threads=32"),
-        ("buf1g_t16", "--innodb-buffer-pool-size=1G", "--threads=16"),
-        ("t64", "--innodb-buffer-pool-size=512M", "--threads=64"),
-        ("classic", "--innodb-buffer-pool-size=512M", "--threads=16"),
-    ]
-    mysql_configs = []
-    for cfg_name, mysqld_args, sb_threads in mysql_cfgs:
-        sb_args = (
-            f"--db-driver=mysql --mysql-host={SERVICE_IPS['mysql']} --mysql-user=root "
-            f"--mysql-password=password --mysql-db=test --mysql-ssl=off "
-            f"--tables=8 --table-size=10000 {sb_threads}"
-        )
-        mysql_configs.append(
-            {
-                "config_name": cfg_name,
-                "server_cmd": mysql_server_base + mysqld_args,
-                "sysbench_mysql_prepare_cmd": (
-                    f"docker exec {BENCH_CONTAINER} sh -lc "
-                    f"\"set -e; sysbench oltp_read_write {sb_args} prepare\""
-                ),
-                "bench_cmd": (
-                    f"docker exec {BENCH_CONTAINER} sh -lc "
-                    f"\"set -e; "
-                    f"sysbench oltp_read_write {sb_args} --time={{bench_duration}} --report-interval=10 run; "
-                    f"sysbench oltp_read_write {sb_args} cleanup >/dev/null\""
-                ),
-                "container_name": "target-mysql",
-                "service_type": "mysql",
-                "bench_tool": "sysbench",
-                "needs_mysql_ready": True,
-            }
-        )
-
-    # Memcached: vary memory size, thread count, and client pressure.
-    memc_server_base = (
-        f"docker run -d --name target-memcached "
-        f"{cpuset_arg}"
-        f"--network {NETWORK_NAME} --ip {SERVICE_IPS['memcached']} "
-        f"{DOCKER_MEMCACHED_IMAGE} "
-    )
-    memc_bench_base = (
-        f"docker exec {BENCH_CONTAINER} memtier_benchmark "
-        f"-s {SERVICE_IPS['memcached']} -p 11211 --protocol=memcache_binary "
-    )
-    memcached_configs = [
-        {
-            "config_name": "m64_t2_low",
-            "server_cmd": memc_server_base + "-m 64 -t 2",
-            "bench_cmd": memc_bench_base + "-c 20 --test-time {bench_duration}",
-            "container_name": "target-memcached",
-            "service_type": "memcached",
-            "bench_tool": "memtier_benchmark",
-        },
-        {
-            "config_name": "m256_t4",
-            "server_cmd": memc_server_base + "-m 256 -t 4",
-            "bench_cmd": memc_bench_base + "-c 50 --test-time {bench_duration}",
-            "container_name": "target-memcached",
-            "service_type": "memcached",
-            "bench_tool": "memtier_benchmark",
-        },
-        {
-            "config_name": "m512_t4",
-            "server_cmd": memc_server_base + "-m 512 -t 4",
-            "bench_cmd": memc_bench_base + "-c 50 --test-time {bench_duration}",
-            "container_name": "target-memcached",
-            "service_type": "memcached",
-            "bench_tool": "memtier_benchmark",
-        },
-        {
-            "config_name": "m256_t8",
-            "server_cmd": memc_server_base + "-m 256 -t 8",
-            "bench_cmd": memc_bench_base + "-c 80 --test-time {bench_duration}",
-            "container_name": "target-memcached",
-            "service_type": "memcached",
-            "bench_tool": "memtier_benchmark",
-        },
-        {
-            "config_name": "m256_t4_high",
-            "server_cmd": memc_server_base + "-m 256 -t 4",
-            "bench_cmd": memc_bench_base + "-c 200 --test-time {bench_duration}",
-            "container_name": "target-memcached",
-            "service_type": "memcached",
-            "bench_tool": "memtier_benchmark",
-        },
-    ]
-
-    return {
-        "redis": redis_configs,
-        "nginx": nginx_configs,
-        "haproxy": haproxy_configs,
-        "postgres": postgres_configs,
-        "mysql": mysql_configs,
-        "memcached": memcached_configs,
-    }
+    return load_workload_config_file(DEFAULT_WORKLOAD_CONFIG, project_dir)
