@@ -111,6 +111,56 @@ python3 scripts/collect/run_cloud_perf_trace_analysis.py \
   --sudo-perf
 ```
 
+The default workload matrix also includes TaoBench and DCPerf v2 Feedsim
+profiles backed by `/home/huangtianhao/colocation-bench-suite`:
+
+```bash
+python3 scripts/collect/run_cloud_perf_trace_analysis.py \
+  --service taobench \
+  --config-name clients16 \
+  --perf-cpu 6 \
+  --target-cpuset 6 \
+  --helper-cpuset 7-10 \
+  --sudo-perf
+
+python3 scripts/collect/run_cloud_perf_trace_analysis.py \
+  --service feedsim \
+  --config-name qps100 \
+  --perf-cpu 6 \
+  --sudo-perf
+```
+
+These profiles reuse the suite's existing containers and launch wrappers.
+They expect its configured DCPerf checkouts and Docker images to be available.
+Override the suite location with `--colocation-bench-suite-dir`. Feedsim uses
+CPUs `0-15` by default because its launcher partitions a zero-based contiguous
+CPU range; override this with the `DCPERF_FEEDSIM_CPUSET` environment variable.
+
+For a measurement-oriented matrix with one multi-core profile per service, use:
+
+```bash
+python3 scripts/collect/run_cloud_perf_trace_analysis.py \
+  --default-workload-config cloud_bench_configs/workloads.machine.json \
+  --service all \
+  --sudo-perf
+```
+
+`workloads.machine.example.json` is the version-controlled template.
+`workloads.machine.json` contains host-specific paths/images and is ignored by
+git. A workload entry can override these collection settings:
+
+- `target_cpuset`: CPUs assigned to the target container.
+- `perf_cpus`: CPU list passed to `perf -C`; use the same CPUs as the target.
+- `bench_cpuset` / `helper_cpuset`: CPUs used by load generators and helpers.
+- `warmup_duration_s`: delay after starting load and before the first trace.
+- `bench_duration_s`: load duration for that workload.
+
+The command-line `--perf-cpus 0-7` option also supports CPU lists globally.
+Per-workload JSON values take precedence over command-line defaults.
+The machine Feedsim profile uses split containers: `target-feedsim-server`
+contains only `LeafNodeRank`, while `helper-feedsim-client` contains
+`DriverNodeRank`. Its cgroup trace therefore excludes the load generator.
+
 `--sudo-perf` elevates only perf commands (`record`, `stat`, `buildid-cache`,
 and `script`). The feature processor still runs as the invoking user. Sudo
 authorization is requested before workloads start and refreshed during long runs.

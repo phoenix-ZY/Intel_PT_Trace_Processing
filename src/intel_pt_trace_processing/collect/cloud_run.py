@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import subprocess
 import time
 from pathlib import Path
@@ -224,7 +225,13 @@ def _run_prepare_step(
         log("🗄️", "Initializing pgbench database...")
         init_result = docker_exec(container_name, cmd)
         if init_result.returncode != 0:
-            log("⚠️", f"pgbench init warning: {init_result.stderr.strip()}")
+            detail = (init_result.stderr or init_result.stdout or "").strip()
+            log(
+                "❌",
+                f"pgbench init failed (rc={init_result.returncode}): "
+                f"{detail or '(no output)'}",
+            )
+            return False
         time.sleep(int(step.get("settle_s", 3)))
         return True
 
@@ -272,6 +279,24 @@ def run_single_config(
     config_name = config["config_name"]
     container_name = config["container_name"]
     bench_name = f"{service_type}.{config_name}"
+    runtime_args = copy.copy(cli_args)
+    if runtime_args is not None:
+        for name in ("target_cpuset", "bench_cpuset", "helper_cpuset"):
+            if name in config:
+                setattr(runtime_args, name, str(config[name]))
+    effective_warmup = int(config.get("warmup_duration_s", warmup_duration))
+    effective_bench_duration = int(config.get("bench_duration_s", bench_duration))
+    runtime_target_cpuset = (
+        str(getattr(runtime_args, "target_cpuset", ""))
+        if runtime_args is not None
+        else ""
+    )
+    default_perf_cpus = 6
+    if runtime_args is not None:
+        default_perf_cpus = getattr(runtime_args, "perf_cpus", None) or getattr(
+            runtime_args, "perf_cpu", 6
+        )
+    runtime_perf_cpus = str(config.get("perf_cpus", default_perf_cpus))
 
     # If previous runs left 0-byte perf.data files, they will poison re-runs (existence-based skipping).
     # Clean them up before deciding whether to collect more.
@@ -311,6 +336,11 @@ def run_single_config(
         print(f"\n{'─' * 60}")
         print(f"  🧪  {bench_name}")
         print(f"{'─' * 60}")
+        log(
+            "🧭",
+            f"target_cpuset={runtime_target_cpuset} perf_cpus={runtime_perf_cpus} "
+            f"warmup={effective_warmup}s load_duration={effective_bench_duration}s",
+        )
 
     if not skip_collect:
         target_role = _target_role(config)
@@ -322,7 +352,7 @@ def run_single_config(
             docker_stop_rm(helper_name)
             helper_cmd = _render_workload_cmd(
                 str(helper_role["start_cmd"]),
-                cli_args=cli_args,
+                cli_args=runtime_args,
                 project_dir=project_dir,
                 output_dir=output_dir,
                 bench_name=bench_name,
@@ -339,7 +369,7 @@ def run_single_config(
                 if not _run_ready_check(
                     check,
                     target_container_name=helper_name,
-                    cli_args=cli_args,
+                    cli_args=runtime_args,
                     project_dir=project_dir,
                     output_dir=output_dir,
                     bench_name=bench_name,
@@ -352,7 +382,7 @@ def run_single_config(
         docker_stop_rm(container_name)
         server_cmd = _render_workload_cmd(
             str(target_role["start_cmd"]),
-            cli_args=cli_args,
+            cli_args=runtime_args,
             project_dir=project_dir,
             output_dir=output_dir,
             bench_name=bench_name,
@@ -372,7 +402,7 @@ def run_single_config(
             if not _run_ready_check(
                 check,
                 target_container_name=container_name,
-                cli_args=cli_args,
+                cli_args=runtime_args,
                 project_dir=project_dir,
                 output_dir=output_dir,
                 bench_name=bench_name,
@@ -386,7 +416,7 @@ def run_single_config(
         for step in config.get("prepare_steps", []):
             if not _run_prepare_step(
                 step,
-                cli_args=cli_args,
+                cli_args=runtime_args,
                 project_dir=project_dir,
                 output_dir=output_dir,
                 bench_name=bench_name,
@@ -400,8 +430,8 @@ def run_single_config(
         # ── Start the benchmark load ────────────────────────────────────
         bench_cmd = _render_workload_cmd(
             str(config.get("load_cmd", config["bench_cmd"])),
-            bench_duration=bench_duration,
-            cli_args=cli_args,
+            bench_duration=effective_bench_duration,
+            cli_args=runtime_args,
             project_dir=project_dir,
             output_dir=output_dir,
             bench_name=bench_name,
@@ -415,8 +445,19 @@ def run_single_config(
         )
 
         # Wait for load to warm up before tracing
-        log("🔥", f"Warming up for {warmup_duration}s before tracing...")
-        time.sleep(warmup_duration)
+        log("🔥", f"Warming up for {effective_warmup}s before tracing...")
+        warmup_deadline = time.monotonic() + effective_warmup
+        while time.monotonic() < warmup_deadline:
+            if bench_process.poll() is not None:
+                log(
+                    "❌",
+                    f"Load exited during warmup (rc={bench_process.returncode}); "
+                    f"skipping {bench_name}",
+                )
+                docker_stop_rm(container_name)
+                _cleanup_helpers(helper_roles)
+                return
+            time.sleep(min(1.0, max(0.0, warmup_deadline - time.monotonic())))
 
         # ── Find the worker PID to trace ─────────────────────────────────
         main_pid = docker_inspect_pid(container_name)
@@ -427,9 +468,13 @@ def run_single_config(
             _cleanup_helpers(helper_roles)
             return
 
-        perf_target = cpu_perf_target(int(getattr(cli_args, "perf_cpu", 6) if cli_args is not None else 6))
+        perf_target = cpu_perf_target(runtime_perf_cpus)
         monitor_pid = main_pid
-        use_sudo_perf = bool(getattr(cli_args, "sudo_perf", False)) if cli_args is not None else False
+        use_sudo_perf = (
+            bool(getattr(runtime_args, "sudo_perf", False))
+            if runtime_args is not None
+            else False
+        )
         try:
             Path(f"/proc/{main_pid}/maps").read_text(encoding="utf-8", errors="replace")
             maps_readable = True
@@ -455,7 +500,7 @@ def run_single_config(
             return
         log(
             "🚀",
-            f"Tracing CPU {perf_target.cpu} with perf -C -G {perf_cgroup} "
+            f"Tracing CPU(s) {perf_target.cpu} with perf -C -G {perf_cgroup} "
             f"(container main PID {main_pid})",
         )
 
@@ -468,13 +513,13 @@ def run_single_config(
 
         # ── Collect PT traces ─────────────────────────────────────────────
         mmap_pages = (
-            cli_args.perf_mmap_pages
-            if cli_args is not None
+            runtime_args.perf_mmap_pages
+            if runtime_args is not None
             else DEFAULT_PERF_MMAP_PAGES
         )
         nrc = (
-            int(cli_args.perf_pt_noretcomp)
-            if cli_args is not None
+            int(runtime_args.perf_pt_noretcomp)
+            if runtime_args is not None
             else 0
         )
         pt_event = f"intel_pt/cyc,noretcomp={nrc}/u"
@@ -493,8 +538,8 @@ def run_single_config(
                 intel_pt_event=pt_event,
                 perf_cgroup=perf_cgroup,
                 perf_command_prefix=("sudo", "-n") if use_sudo_perf else (),
-                collect_mode=str(getattr(cli_args, "collect_mode", "pt")) if cli_args is not None else "pt",
-                perf_stat_events=str(getattr(cli_args, "perf_stat_events", "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults")) if cli_args is not None else "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults",
+                collect_mode=str(getattr(runtime_args, "collect_mode", "pt")) if runtime_args is not None else "pt",
+                perf_stat_events=str(getattr(runtime_args, "perf_stat_events", "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults")) if runtime_args is not None else "cycles,instructions,branches,branch-misses,cache-references,cache-misses,stalled-cycles-frontend,stalled-cycles-backend,ref-cycles,task-clock,context-switches,cpu-migrations,page-faults",
                 start_index=existing_n if (has_perf and selections_verified and existing_n < max_samples) else 0,
             )
         finally:

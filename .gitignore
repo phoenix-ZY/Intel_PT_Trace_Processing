@@ -84,3 +84,9 @@ certs
 paper
 # 运行日志，无需提交
 *.log
+
+# Machine-specific cloud workload matrices. Keep only the canonical full
+# matrix and the portable one-profile-per-service example in git.
+cloud_bench_configs/workloads.*.json
+!cloud_bench_configs/workloads.default.json
+!cloud_bench_configs/workloads.machine.example.json

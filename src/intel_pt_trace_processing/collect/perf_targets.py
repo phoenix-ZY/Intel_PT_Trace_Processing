@@ -2,27 +2,49 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 
+CPU_LIST_RE = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
+
+
+def normalize_cpu_spec(value: int | str) -> str:
+    spec = str(value).strip()
+    if not spec or not CPU_LIST_RE.fullmatch(spec):
+        raise ValueError(
+            f"invalid CPU list {value!r}; expected N, N-M, or comma-separated ranges"
+        )
+    for part in spec.split(","):
+        if "-" not in part:
+            continue
+        start, end = (int(item) for item in part.split("-", 1))
+        if end < start:
+            raise ValueError(f"invalid descending CPU range {part!r}")
+    return spec
+
+
 @dataclass(frozen=True)
 class PerfTarget:
     """CPU/core target selector for perf record/stat."""
 
-    cpu: int
+    cpu: int | str
 
     @property
     def flag(self) -> str:
         return "-C"
 
     def args(self) -> list[str]:
-        return [self.flag, str(self.cpu)]
+        return [self.flag, normalize_cpu_spec(self.cpu)]
 
     def to_json(self) -> dict[str, int | str]:
-        return {"kind": "cpu", "flag": self.flag, "id": int(self.cpu)}
+        spec = normalize_cpu_spec(self.cpu)
+        if spec.isdigit():
+            return {"kind": "cpu", "flag": self.flag, "id": int(spec)}
+        return {"kind": "cpu-list", "flag": self.flag, "id": spec}
 
 
 def add_perf_target_args(
@@ -44,10 +66,8 @@ def validate_perf_target_args(args: argparse.Namespace) -> None:
         raise SystemExit("--perf-cpu must be >= 0")
 
 
-def cpu_perf_target(cpu: int) -> PerfTarget:
-    if cpu < 0:
-        raise ValueError("cpu must be >= 0")
-    return PerfTarget(cpu=int(cpu))
+def cpu_perf_target(cpu: int | str) -> PerfTarget:
+    return PerfTarget(cpu=normalize_cpu_spec(cpu))
 
 
 def perf_record_cmd(

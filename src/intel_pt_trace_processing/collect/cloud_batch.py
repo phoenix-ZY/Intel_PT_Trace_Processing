@@ -114,10 +114,14 @@ def main():
     print(f"🔍 Services   : {', '.join(services_to_run)}")
     print(f"📦 Configs    : {total_configs} total (one classic profile per service)")
     print(f"⏱️  Interval   : {args.interval}s between samples")
-    print(f"🕐 Bench dur  : {args.bench_duration}s per config")
+    print(f"🕐 Bench dur  : {args.bench_duration}s default (JSON may override)")
+    print(f"🔥 Warmup     : {args.warmup_duration}s default (JSON may override)")
     print(f"🔬 perf -m    : {args.perf_mmap_pages} (data,aux mmap pages)")
     print(f"🔬 intel_pt   : noretcomp={args.perf_pt_noretcomp}")
-    print(f"🎯 perf target: cpu={args.perf_cpu} target_cpuset={args.target_cpuset}")
+    print(
+        f"🎯 perf target: cpus={args.perf_cpus or args.perf_cpu} "
+        f"target_cpuset={args.target_cpuset}"
+    )
     print(f"🧰 bench CPU  : bench_cpuset={args.bench_cpuset} helper_cpuset={args.helper_cpuset}")
     print(f"📊 Post-process: {'off' if args.no_post_process else 'perf script + trace_feature_processor'}\n")
 

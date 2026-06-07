@@ -6,6 +6,7 @@ from pathlib import Path
 
 from intel_pt_trace_processing.collect.perf_targets import (
     add_perf_target_args,
+    normalize_cpu_spec,
     validate_perf_target_args,
 )
 from intel_pt_trace_processing.perf.stream import (
@@ -163,6 +164,15 @@ def build_cloud_arg_parser() -> argparse.ArgumentParser:
     )
     add_perf_target_args(parser, default_cpu=6)
     parser.add_argument(
+        "--perf-cpus",
+        type=str,
+        default=None,
+        help=(
+            "CPU list recorded with perf -C, for example 0-7 or 0-3,8-11. "
+            "Overrides --perf-cpu for cloud workloads."
+        ),
+    )
+    parser.add_argument(
         "--target-cpuset",
         type=str,
         default=None,
@@ -236,8 +246,13 @@ def parse_cloud_args(argv: list[str] | None = None) -> argparse.Namespace:
     if bool(getattr(args, "perf_stat", False)):
         args.collect_mode = "stat"
     validate_perf_target_args(args)
+    if args.perf_cpus is not None:
+        try:
+            args.perf_cpus = normalize_cpu_spec(args.perf_cpus)
+        except ValueError as exc:
+            sys.exit(f"--perf-cpus: {exc}")
     if args.target_cpuset is None:
-        args.target_cpuset = str(args.perf_cpu)
+        args.target_cpuset = str(args.perf_cpus or args.perf_cpu)
     if str(getattr(args, "collect_mode", "pt")) == "stat" and bool(getattr(args, "perf_stat_topdown", False)):
         td = "slots,topdown-retiring,topdown-bad-spec,topdown-fe-bound,topdown-be-bound"
         args.perf_stat_events = f"{args.perf_stat_events},{td}"

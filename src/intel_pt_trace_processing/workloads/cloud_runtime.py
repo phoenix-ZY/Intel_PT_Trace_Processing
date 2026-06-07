@@ -63,14 +63,18 @@ def docker_perf_event_cgroup(container_pid: int) -> str | None:
         parts = line.split(":", 2)
         if len(parts) != 3:
             continue
-        controllers = parts[1].split(",")
-        if "perf_event" not in controllers:
-            continue
         cgroup = parts[2].strip().lstrip("/")
         if not cgroup:
-            return None
+            continue
+        controllers = parts[1].split(",")
+        if not parts[1]:
+            if (Path("/sys/fs/cgroup") / cgroup).is_dir():
+                return cgroup
+            continue
+        if "perf_event" not in controllers:
+            continue
         if not (Path("/sys/fs/cgroup/perf_event") / cgroup).is_dir():
-            return None
+            continue
         return cgroup
     return None
 
@@ -244,6 +248,10 @@ def normalize_cloud_config(config: dict, project_dir: Path) -> dict:
     config.setdefault("ready_checks", [])
     config.setdefault("prepare_steps", [])
     config.setdefault("startup_wait_s", 5)
+
+    for key in ("startup_wait_s", "warmup_duration_s", "bench_duration_s"):
+        if key in config and int(config[key]) < 0:
+            raise ValueError(f"{key} must be >= 0: {config!r}")
 
     if not isinstance(config["helper_roles"], list):
         raise ValueError(f"helper_roles must be a list: {config!r}")

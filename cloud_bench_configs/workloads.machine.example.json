@@ -1,0 +1,243 @@
+{
+  "description": "Portable example: one realistic multi-core profile per cloud service.",
+  "services": {
+    "redis": [
+      {
+        "config_name": "classic_8c",
+        "service_type": "redis",
+        "bench_tool": "memtier_benchmark",
+        "target_cpuset": "0-7",
+        "perf_cpus": "0-7",
+        "bench_cpuset": "16-31",
+        "warmup_duration_s": 30,
+        "bench_duration_s": 300,
+        "target_role": {
+          "name": "server",
+          "container_name": "target-redis",
+          "start_cmd": "docker run -d --name target-redis {target_cpuset_arg}--network perf-net --ip 172.30.0.10 ${DOCKER_REDIS_IMAGE:-redis:7.2-alpine} redis-server --save '' --appendonly no --maxmemory 4gb --maxmemory-policy allkeys-lru"
+        },
+        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.10 -p 6379 -t 8 -c 32 --pipeline 32 --ratio 1:10 --test-time {bench_duration}"
+      }
+    ],
+    "nginx": [
+      {
+        "config_name": "w8_1k",
+        "service_type": "nginx",
+        "bench_tool": "wrk",
+        "target_cpuset": "0-7",
+        "perf_cpus": "0-7",
+        "bench_cpuset": "16-31",
+        "warmup_duration_s": 30,
+        "bench_duration_s": 300,
+        "target_role": {
+          "name": "server",
+          "container_name": "target-nginx",
+          "start_cmd": "docker run -d --name target-nginx {target_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf.template:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine} sh -lc 'sed -E \"s/^worker_processes[[:space:]].*;/worker_processes 8;/\" /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g \"daemon off;\"'"
+        },
+        "ready_checks": [
+          {
+            "type": "nginx_http",
+            "host": "172.30.0.11",
+            "path": "/1k.bin",
+            "timeout_s": 60
+          }
+        ],
+        "load_cmd": "docker exec bench-client wrk -t8 -c256 -d {bench_duration}s http://172.30.0.11:80/1k.bin"
+      }
+    ],
+    "haproxy": [
+      {
+        "config_name": "classic_8c",
+        "service_type": "haproxy",
+        "bench_tool": "wrk",
+        "target_cpuset": "0-7",
+        "perf_cpus": "0-7",
+        "bench_cpuset": "24-31",
+        "helper_cpuset": "16-23",
+        "warmup_duration_s": 30,
+        "bench_duration_s": 300,
+        "helper_roles": [
+          {
+            "name": "nginx_backend",
+            "container_name": "target-nginx-helper",
+            "start_cmd": "docker run -d --name target-nginx-helper {helper_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf.template:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine} sh -lc 'sed -E \"s/^worker_processes[[:space:]].*;/worker_processes 8;/\" /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g \"daemon off;\"'",
+            "ready_checks": [
+              {
+                "type": "nginx_http",
+                "host": "172.30.0.11",
+                "path": "/1k.bin",
+                "timeout_s": 60
+              }
+            ]
+          }
+        ],
+        "target_role": {
+          "name": "server",
+          "container_name": "target-haproxy",
+          "start_cmd": "docker run -d --name target-haproxy {target_cpuset_arg}--network perf-net --ip 172.30.0.14 -v {project_dir}/cloud_bench_configs/haproxy-http.cfg:/tmp/haproxy.cfg.template:ro ${DOCKER_HAPROXY_IMAGE:-haproxy:2.8} sh -lc 'sed \"/^global/a\\\\    nbthread 8\" /tmp/haproxy.cfg.template > /tmp/haproxy.cfg && exec haproxy -W -db -f /tmp/haproxy.cfg'"
+        },
+        "load_cmd": "docker exec bench-client wrk -t8 -c256 -d {bench_duration}s http://172.30.0.14:9000/1k.bin"
+      }
+    ],
+    "postgres": [
+      {
+        "config_name": "rw_c32",
+        "service_type": "postgres",
+        "bench_tool": "pgbench",
+        "target_cpuset": "0-7",
+        "perf_cpus": "0-7",
+        "helper_cpuset": "16-31",
+        "warmup_duration_s": 60,
+        "bench_duration_s": 300,
+        "helper_roles": [
+          {
+            "name": "loadgen",
+            "container_name": "helper-postgres-loadgen",
+            "start_cmd": "docker run -d --name helper-postgres-loadgen {helper_cpuset_arg}--network perf-net -e PGPASSWORD=password ${DOCKER_POSTGRES_IMAGE:-postgres:15-alpine} sleep infinity"
+          }
+        ],
+        "target_role": {
+          "name": "server",
+          "container_name": "target-postgres",
+          "start_cmd": "docker run -d --name target-postgres {target_cpuset_arg}--network perf-net --ip 172.30.0.16 -e POSTGRES_PASSWORD=password ${DOCKER_POSTGRES_IMAGE:-postgres:15-alpine} postgres -c shared_buffers=4GB -c max_connections=200"
+        },
+        "ready_checks": [
+          {
+            "type": "shell",
+            "cmd": "docker exec target-postgres pg_isready -U postgres",
+            "timeout_s": 90,
+            "interval_s": 1
+          }
+        ],
+        "prepare_steps": [
+          {
+            "type": "shell",
+            "name": "initialize pgbench scale 20",
+            "cmd": "docker exec helper-postgres-loadgen pgbench -i -s 20 -h 172.30.0.16 -U postgres postgres"
+          }
+        ],
+        "load_cmd": "docker exec helper-postgres-loadgen pgbench -c 32 -j 8 -T {bench_duration} -h 172.30.0.16 -U postgres postgres"
+      }
+    ],
+    "mysql": [
+      {
+        "config_name": "rw_t32",
+        "service_type": "mysql",
+        "bench_tool": "sysbench",
+        "target_cpuset": "0-7",
+        "perf_cpus": "0-7",
+        "bench_cpuset": "16-31",
+        "warmup_duration_s": 120,
+        "bench_duration_s": 600,
+        "target_role": {
+          "name": "server",
+          "container_name": "target-mysql",
+          "start_cmd": "docker run -d --name target-mysql {target_cpuset_arg}--network perf-net --ip 172.30.0.12 -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=test ${DOCKER_MYSQL_IMAGE:-mysql:8.0} --innodb-buffer-pool-size=4G --max-connections=256"
+        },
+        "ready_checks": [
+          {
+            "type": "mysql_container",
+            "container_name": "target-mysql",
+            "timeout_s": 120
+          },
+          {
+            "type": "mysql_bench_client",
+            "host": "172.30.0.12",
+            "timeout_s": 120
+          }
+        ],
+        "prepare_steps": [
+          {
+            "type": "sysbench_mysql_prepare",
+            "cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=16 --table-size=100000 --threads=32 prepare\""
+          }
+        ],
+        "load_cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=16 --table-size=100000 --threads=32 --time={bench_duration} --report-interval=10 run; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=16 --table-size=100000 --threads=32 cleanup >/dev/null\""
+      }
+    ],
+    "memcached": [
+      {
+        "config_name": "m4g_t8",
+        "service_type": "memcached",
+        "bench_tool": "memtier_benchmark",
+        "target_cpuset": "0-7",
+        "perf_cpus": "0-7",
+        "bench_cpuset": "16-31",
+        "warmup_duration_s": 30,
+        "bench_duration_s": 300,
+        "target_role": {
+          "name": "server",
+          "container_name": "target-memcached",
+          "start_cmd": "docker run -d --name target-memcached {target_cpuset_arg}--network perf-net --ip 172.30.0.13 ${DOCKER_MEMCACHED_IMAGE:-memcached:1.6} -m 4096 -t 8"
+        },
+        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.13 -p 11211 --protocol=memcache_binary -t 8 -c 32 --pipeline 16 --ratio 1:10 --test-time {bench_duration}"
+      }
+    ],
+    "taobench": [
+      {
+        "config_name": "v2_clients16",
+        "service_type": "taobench",
+        "bench_tool": "dcperf_tao_bench",
+        "target_cpuset": "0-7",
+        "perf_cpus": "0-7",
+        "helper_cpuset": "16-31",
+        "warmup_duration_s": 300,
+        "bench_duration_s": 600,
+        "helper_roles": [
+          {
+            "name": "loadgen",
+            "container_name": "helper-taobench-loadgen",
+            "start_cmd": "CLAB_IMAGE=${DCPERF_V2_TAO_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed-tools} DCPERF_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf LOADGEN_CONTAINER=helper-taobench-loadgen LOADGEN_CPUSET={helper_cpuset} LOADGEN_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_loadgen.sh"
+          }
+        ],
+        "target_role": {
+          "name": "server",
+          "container_name": "target-taobench-server",
+          "start_cmd": "CLAB_IMAGE=${DCPERF_V2_TAO_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed-tools} DCPERF_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf SERVER_CONTAINER=target-taobench-server SERVER_CPUSET={target_cpuset} SERVER_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_server.sh && DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf SERVER_CONTAINER=target-taobench-server TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/start_server.sh /workspace/results/taobench_cloud_server.log 300 1800"
+        },
+        "ready_checks": [
+          {
+            "type": "shell",
+            "cmd": "docker exec target-taobench-server bash -lc \"ss -ltn | grep -q ':11211 '\"",
+            "timeout_s": 180,
+            "interval_s": 2
+          }
+        ],
+        "load_cmd": "DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf SERVER_CONTAINER=target-taobench-server LOADGEN_CONTAINER=helper-taobench-loadgen CLIENT_WARMUP_TIME=300 CLIENT_WAIT_AFTER_WARMUP=5 TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/run_client.sh 16 {bench_duration} /tmp/taobench-v2-clients16.log"
+      }
+    ],
+    "feedsim": [
+      {
+        "config_name": "qps100_16c",
+        "service_type": "feedsim",
+        "bench_tool": "dcperf_feedsim",
+        "target_cpuset": "0-15",
+        "perf_cpus": "0-15",
+        "helper_cpuset": "16-31",
+        "warmup_duration_s": 300,
+        "bench_duration_s": 600,
+        "helper_roles": [
+          {
+            "name": "loadgen",
+            "container_name": "helper-feedsim-client",
+            "start_cmd": "DCPERF_V2_IMAGE=${DCPERF_V2_FEEDSIM_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed-tools} DCPERF_V2_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} FEEDSIM_CLIENT_CONTAINER=helper-feedsim-client FEEDSIM_CLIENT_CPUSET={helper_cpuset} FEEDSIM_CLIENT_MEMS=0 bash {colocation_bench_suite_dir}/online/feedsim/start_split_client.sh"
+          }
+        ],
+        "target_role": {
+          "name": "server",
+          "container_name": "target-feedsim-server",
+          "start_cmd": "DCPERF_V2_IMAGE=${DCPERF_V2_FEEDSIM_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed-tools} DCPERF_V2_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} FEEDSIM_SERVER_CONTAINER=target-feedsim-server FEEDSIM_SERVER_CPUSET={target_cpuset} FEEDSIM_SERVER_MEMS=0 FEEDSIM_SERVER_PORT=11222 FEEDSIM_SERVER_MONITOR_PORT=10222 bash {colocation_bench_suite_dir}/online/feedsim/start_split_server.sh"
+        },
+        "ready_checks": [
+          {
+            "type": "shell",
+            "cmd": "docker exec target-feedsim-server curl -fsS --max-time 2 http://127.0.0.1:10222/topology >/dev/null",
+            "timeout_s": 180,
+            "interval_s": 1
+          }
+        ],
+        "load_cmd": "FEEDSIM_CLIENT_CONTAINER=helper-feedsim-client DCPERF_V2_CONTAINER_DIR=/DCPerf FEEDSIM_SERVER_HOST=127.0.0.1 FEEDSIM_SERVER_PORT=11222 FEEDSIM_CLIENT_MONITOR_PORT=9222 bash {colocation_bench_suite_dir}/online/feedsim/run_split_client.sh 100 {bench_duration} 300 /tmp/feedsim-split-qps100-16c.log /tmp/feedsim-split-qps100-16c.json"
+      }
+    ]
+  }
+}

@@ -406,6 +406,151 @@
         },
         "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.13 -p 11211 --protocol=memcache_binary -c 200 --test-time {bench_duration}"
       }
+    ],
+    "taobench": [
+      {
+        "config_name": "clients8",
+        "service_type": "taobench",
+        "bench_tool": "dcperf_tao_bench",
+        "helper_roles": [
+          {
+            "name": "loadgen",
+            "container_name": "helper-taobench-loadgen",
+            "start_cmd": "LOADGEN_CONTAINER=helper-taobench-loadgen LOADGEN_CPUSET={helper_cpuset} LOADGEN_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_loadgen.sh"
+          }
+        ],
+        "target_role": {
+          "name": "server",
+          "container_name": "target-taobench-server",
+          "start_cmd": "SERVER_CONTAINER=target-taobench-server SERVER_CPUSET={target_cpuset} SERVER_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_server.sh && SERVER_CONTAINER=target-taobench-server TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/start_server.sh /workspace/results/taobench_cloud_server.log 300 7200"
+        },
+        "ready_checks": [
+          {
+            "type": "shell",
+            "cmd": "docker exec target-taobench-server bash -lc \"ss -ltn | grep -q ':11211 '\"",
+            "timeout_s": 180,
+            "interval_s": 2
+          }
+        ],
+        "startup_wait_s": 5,
+        "load_cmd": "SERVER_CONTAINER=target-taobench-server LOADGEN_CONTAINER=helper-taobench-loadgen CLIENT_WARMUP_TIME=20 CLIENT_WAIT_AFTER_WARMUP=2 TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/run_client.sh 8 {bench_duration} /tmp/taobench-clients8.log"
+      },
+      {
+        "config_name": "clients16",
+        "service_type": "taobench",
+        "bench_tool": "dcperf_tao_bench",
+        "helper_roles": [
+          {
+            "name": "loadgen",
+            "container_name": "helper-taobench-loadgen",
+            "start_cmd": "LOADGEN_CONTAINER=helper-taobench-loadgen LOADGEN_CPUSET={helper_cpuset} LOADGEN_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_loadgen.sh"
+          }
+        ],
+        "target_role": {
+          "name": "server",
+          "container_name": "target-taobench-server",
+          "start_cmd": "SERVER_CONTAINER=target-taobench-server SERVER_CPUSET={target_cpuset} SERVER_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_server.sh && SERVER_CONTAINER=target-taobench-server TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/start_server.sh /workspace/results/taobench_cloud_server.log 300 7200"
+        },
+        "ready_checks": [
+          {
+            "type": "shell",
+            "cmd": "docker exec target-taobench-server bash -lc \"ss -ltn | grep -q ':11211 '\"",
+            "timeout_s": 180,
+            "interval_s": 2
+          }
+        ],
+        "startup_wait_s": 5,
+        "load_cmd": "SERVER_CONTAINER=target-taobench-server LOADGEN_CONTAINER=helper-taobench-loadgen CLIENT_WARMUP_TIME=20 CLIENT_WAIT_AFTER_WARMUP=2 TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/run_client.sh 16 {bench_duration} /tmp/taobench-clients16.log"
+      },
+      {
+        "config_name": "clients32",
+        "service_type": "taobench",
+        "bench_tool": "dcperf_tao_bench",
+        "helper_roles": [
+          {
+            "name": "loadgen",
+            "container_name": "helper-taobench-loadgen",
+            "start_cmd": "LOADGEN_CONTAINER=helper-taobench-loadgen LOADGEN_CPUSET={helper_cpuset} LOADGEN_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_loadgen.sh"
+          }
+        ],
+        "target_role": {
+          "name": "server",
+          "container_name": "target-taobench-server",
+          "start_cmd": "SERVER_CONTAINER=target-taobench-server SERVER_CPUSET={target_cpuset} SERVER_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_server.sh && SERVER_CONTAINER=target-taobench-server TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/start_server.sh /workspace/results/taobench_cloud_server.log 300 7200"
+        },
+        "ready_checks": [
+          {
+            "type": "shell",
+            "cmd": "docker exec target-taobench-server bash -lc \"ss -ltn | grep -q ':11211 '\"",
+            "timeout_s": 180,
+            "interval_s": 2
+          }
+        ],
+        "startup_wait_s": 5,
+        "load_cmd": "SERVER_CONTAINER=target-taobench-server LOADGEN_CONTAINER=helper-taobench-loadgen CLIENT_WARMUP_TIME=20 CLIENT_WAIT_AFTER_WARMUP=2 TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/run_client.sh 32 {bench_duration} /tmp/taobench-clients32.log"
+      }
+    ],
+    "feedsim": [
+      {
+        "config_name": "qps50",
+        "service_type": "feedsim",
+        "bench_tool": "dcperf_feedsim",
+        "target_role": {
+          "name": "server",
+          "container_name": "target-feedsim",
+          "start_cmd": "FEEDSIM_CONTAINER=target-feedsim FEEDSIM_CPUSET=${DCPERF_FEEDSIM_CPUSET:-0-15} FEEDSIM_MEMS=0 DCPERF_V2_DIR=${DCPERF_V2_DIR:-/home/huangtianhao/benchdeps/DCPerf-v2} bash {colocation_bench_suite_dir}/online/feedsim/start_server.sh"
+        },
+        "ready_checks": [
+          {
+            "type": "shell",
+            "cmd": "docker exec target-feedsim bash -lc \"cd /DCPerf && python3 benchpress_cli.py list | grep -q '^feedsim'\"",
+            "timeout_s": 60,
+            "interval_s": 2
+          }
+        ],
+        "startup_wait_s": 2,
+        "load_cmd": "FEEDSIM_CONTAINER=target-feedsim DCPERF_V2_CONTAINER_DIR=/DCPerf FEEDSIM_BENCHMARK=feedsim_autoscale_mini FEEDSIM_NUM_INSTANCES=1 FEEDSIM_EXTRA_ARGS='-q 50 -d {bench_duration} -w 20' bash {colocation_bench_suite_dir}/online/feedsim/run_client.sh /tmp/feedsim-qps50.log /tmp/feedsim-qps50.json"
+      },
+      {
+        "config_name": "qps100",
+        "service_type": "feedsim",
+        "bench_tool": "dcperf_feedsim",
+        "target_role": {
+          "name": "server",
+          "container_name": "target-feedsim",
+          "start_cmd": "FEEDSIM_CONTAINER=target-feedsim FEEDSIM_CPUSET=${DCPERF_FEEDSIM_CPUSET:-0-15} FEEDSIM_MEMS=0 DCPERF_V2_DIR=${DCPERF_V2_DIR:-/home/huangtianhao/benchdeps/DCPerf-v2} bash {colocation_bench_suite_dir}/online/feedsim/start_server.sh"
+        },
+        "ready_checks": [
+          {
+            "type": "shell",
+            "cmd": "docker exec target-feedsim bash -lc \"cd /DCPerf && python3 benchpress_cli.py list | grep -q '^feedsim'\"",
+            "timeout_s": 60,
+            "interval_s": 2
+          }
+        ],
+        "startup_wait_s": 2,
+        "load_cmd": "FEEDSIM_CONTAINER=target-feedsim DCPERF_V2_CONTAINER_DIR=/DCPerf FEEDSIM_BENCHMARK=feedsim_autoscale_mini FEEDSIM_NUM_INSTANCES=1 FEEDSIM_EXTRA_ARGS='-q 100 -d {bench_duration} -w 20' bash {colocation_bench_suite_dir}/online/feedsim/run_client.sh /tmp/feedsim-qps100.log /tmp/feedsim-qps100.json"
+      },
+      {
+        "config_name": "qps200",
+        "service_type": "feedsim",
+        "bench_tool": "dcperf_feedsim",
+        "target_role": {
+          "name": "server",
+          "container_name": "target-feedsim",
+          "start_cmd": "FEEDSIM_CONTAINER=target-feedsim FEEDSIM_CPUSET=${DCPERF_FEEDSIM_CPUSET:-0-15} FEEDSIM_MEMS=0 DCPERF_V2_DIR=${DCPERF_V2_DIR:-/home/huangtianhao/benchdeps/DCPerf-v2} bash {colocation_bench_suite_dir}/online/feedsim/start_server.sh"
+        },
+        "ready_checks": [
+          {
+            "type": "shell",
+            "cmd": "docker exec target-feedsim bash -lc \"cd /DCPerf && python3 benchpress_cli.py list | grep -q '^feedsim'\"",
+            "timeout_s": 60,
+            "interval_s": 2
+          }
+        ],
+        "startup_wait_s": 2,
+        "load_cmd": "FEEDSIM_CONTAINER=target-feedsim DCPERF_V2_CONTAINER_DIR=/DCPerf FEEDSIM_BENCHMARK=feedsim_autoscale_mini FEEDSIM_NUM_INSTANCES=1 FEEDSIM_EXTRA_ARGS='-q 200 -d {bench_duration} -w 20' bash {colocation_bench_suite_dir}/online/feedsim/run_client.sh /tmp/feedsim-qps200.log /tmp/feedsim-qps200.json"
+      }
     ]
   }
 }
