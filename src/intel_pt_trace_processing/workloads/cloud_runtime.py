@@ -7,7 +7,10 @@ import sys
 import time
 from pathlib import Path
 
+from intel_pt_trace_processing.workloads.cbs_images import ensure_cbs_image_env
 from intel_pt_trace_processing.workloads.cloud import docker_cpuset_arg
+
+ensure_cbs_image_env()
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_WORKLOAD_CONFIG = Path(
@@ -24,7 +27,7 @@ BENCH_IP = "172.30.0.20"
 
 DOCKER_BENCH_CLIENT_IMAGE = os.environ.get(
     "DOCKER_BENCH_CLIENT_IMAGE",
-    "local/bench-client-full:latest",
+    os.environ.get("CBS_BENCH_CLIENT_IMAGE", "cbs-bench-client:ubuntu22"),
 )
 
 

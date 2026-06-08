@@ -498,7 +498,7 @@
         "target_role": {
           "name": "server",
           "container_name": "target-feedsim",
-          "start_cmd": "FEEDSIM_CONTAINER=target-feedsim FEEDSIM_CPUSET=${DCPERF_FEEDSIM_CPUSET:-0-15} FEEDSIM_MEMS=0 DCPERF_V2_DIR=${DCPERF_V2_DIR:-/home/huangtianhao/benchdeps/DCPerf-v2} bash {colocation_bench_suite_dir}/online/feedsim/start_server.sh"
+          "start_cmd": "FEEDSIM_CONTAINER=target-feedsim FEEDSIM_CPUSET=${DCPERF_FEEDSIM_CPUSET:-0-15} FEEDSIM_MEMS=0 DCPERF_V2_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} bash {colocation_bench_suite_dir}/online/feedsim/start_server.sh"
         },
         "ready_checks": [
           {
@@ -518,7 +518,7 @@
         "target_role": {
           "name": "server",
           "container_name": "target-feedsim",
-          "start_cmd": "FEEDSIM_CONTAINER=target-feedsim FEEDSIM_CPUSET=${DCPERF_FEEDSIM_CPUSET:-0-15} FEEDSIM_MEMS=0 DCPERF_V2_DIR=${DCPERF_V2_DIR:-/home/huangtianhao/benchdeps/DCPerf-v2} bash {colocation_bench_suite_dir}/online/feedsim/start_server.sh"
+          "start_cmd": "FEEDSIM_CONTAINER=target-feedsim FEEDSIM_CPUSET=${DCPERF_FEEDSIM_CPUSET:-0-15} FEEDSIM_MEMS=0 DCPERF_V2_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} bash {colocation_bench_suite_dir}/online/feedsim/start_server.sh"
         },
         "ready_checks": [
           {
@@ -538,7 +538,7 @@
         "target_role": {
           "name": "server",
           "container_name": "target-feedsim",
-          "start_cmd": "FEEDSIM_CONTAINER=target-feedsim FEEDSIM_CPUSET=${DCPERF_FEEDSIM_CPUSET:-0-15} FEEDSIM_MEMS=0 DCPERF_V2_DIR=${DCPERF_V2_DIR:-/home/huangtianhao/benchdeps/DCPerf-v2} bash {colocation_bench_suite_dir}/online/feedsim/start_server.sh"
+          "start_cmd": "FEEDSIM_CONTAINER=target-feedsim FEEDSIM_CPUSET=${DCPERF_FEEDSIM_CPUSET:-0-15} FEEDSIM_MEMS=0 DCPERF_V2_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} bash {colocation_bench_suite_dir}/online/feedsim/start_server.sh"
         },
         "ready_checks": [
           {

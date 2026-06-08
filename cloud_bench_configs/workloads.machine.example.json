@@ -187,13 +187,13 @@
           {
             "name": "loadgen",
             "container_name": "helper-taobench-loadgen",
-            "start_cmd": "CLAB_IMAGE=${DCPERF_V2_TAO_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed-tools} DCPERF_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf LOADGEN_CONTAINER=helper-taobench-loadgen LOADGEN_CPUSET={helper_cpuset} LOADGEN_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_loadgen.sh"
+            "start_cmd": "CLAB_IMAGE=${TAO_CLAB_IMAGE:-${CBS_DCPERF_V2_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed}} DCPERF_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf LOADGEN_CONTAINER=helper-taobench-loadgen LOADGEN_CPUSET={helper_cpuset} LOADGEN_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_loadgen.sh"
           }
         ],
         "target_role": {
           "name": "server",
           "container_name": "target-taobench-server",
-          "start_cmd": "CLAB_IMAGE=${DCPERF_V2_TAO_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed-tools} DCPERF_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf SERVER_CONTAINER=target-taobench-server SERVER_CPUSET={target_cpuset} SERVER_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_server.sh && DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf SERVER_CONTAINER=target-taobench-server TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/start_server.sh /workspace/results/taobench_cloud_server.log 300 1800"
+          "start_cmd": "CLAB_IMAGE=${TAO_CLAB_IMAGE:-${CBS_DCPERF_V2_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed}} DCPERF_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf SERVER_CONTAINER=target-taobench-server SERVER_CPUSET={target_cpuset} SERVER_MEMS=0 bash {colocation_bench_suite_dir}/containers/create_taobench_server.sh && DCPERF_CONTAINER_DIR=/DCPerf DCPERF_CODE_DIR=/DCPerf SERVER_CONTAINER=target-taobench-server TAO_MEMSIZE=16 TAO_SERVER_PORT=11211 bash {colocation_bench_suite_dir}/online/taobench/start_server.sh /workspace/results/taobench_cloud_server.log 300 1800"
         },
         "ready_checks": [
           {
@@ -220,13 +220,13 @@
           {
             "name": "loadgen",
             "container_name": "helper-feedsim-client",
-            "start_cmd": "DCPERF_V2_IMAGE=${DCPERF_V2_FEEDSIM_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed-tools} DCPERF_V2_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} FEEDSIM_CLIENT_CONTAINER=helper-feedsim-client FEEDSIM_CLIENT_CPUSET={helper_cpuset} FEEDSIM_CLIENT_MEMS=0 bash {colocation_bench_suite_dir}/online/feedsim/start_split_client.sh"
+            "start_cmd": "DCPERF_V2_IMAGE=${DCPERF_V2_IMAGE:-${CBS_DCPERF_V2_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed}} DCPERF_V2_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} FEEDSIM_CLIENT_CONTAINER=helper-feedsim-client FEEDSIM_CLIENT_CPUSET={helper_cpuset} FEEDSIM_CLIENT_MEMS=0 bash {colocation_bench_suite_dir}/online/feedsim/start_split_client.sh"
           }
         ],
         "target_role": {
           "name": "server",
           "container_name": "target-feedsim-server",
-          "start_cmd": "DCPERF_V2_IMAGE=${DCPERF_V2_FEEDSIM_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed-tools} DCPERF_V2_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} FEEDSIM_SERVER_CONTAINER=target-feedsim-server FEEDSIM_SERVER_CPUSET={target_cpuset} FEEDSIM_SERVER_MEMS=0 FEEDSIM_SERVER_PORT=11222 FEEDSIM_SERVER_MONITOR_PORT=10222 bash {colocation_bench_suite_dir}/online/feedsim/start_split_server.sh"
+          "start_cmd": "DCPERF_V2_IMAGE=${DCPERF_V2_IMAGE:-${CBS_DCPERF_V2_IMAGE:-dcperf-bench:ubuntu22-feedsim-installed}} DCPERF_V2_DIR=${DCPERF_V2_DIR:?set DCPERF_V2_DIR} FEEDSIM_SERVER_CONTAINER=target-feedsim-server FEEDSIM_SERVER_CPUSET={target_cpuset} FEEDSIM_SERVER_MEMS=0 FEEDSIM_SERVER_PORT=11222 FEEDSIM_SERVER_MONITOR_PORT=10222 bash {colocation_bench_suite_dir}/online/feedsim/start_split_server.sh"
         },
         "ready_checks": [
           {

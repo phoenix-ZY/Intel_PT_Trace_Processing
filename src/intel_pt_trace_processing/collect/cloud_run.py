@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -62,14 +63,13 @@ def _render_workload_cmd(
         "service_type": "" if service_type is None else service_type,
         "config_name": "" if config_name is None else config_name,
         "colocation_bench_suite_dir": str(
-            getattr(
-                cli_args,
-                "colocation_bench_suite_dir",
-                "/home/huangtianhao/colocation-bench-suite",
-            )
+            getattr(cli_args, "colocation_bench_suite_dir", None)
             if cli_args is not None
-            else "/home/huangtianhao/colocation-bench-suite"
-        ),
+            else None
+        )
+        or os.environ.get("COLOCATION_BENCH_SUITE_DIR")
+        or os.environ.get("CBS_ROOT")
+        or str(Path.home() / "colocation-bench-suite"),
     }
     for key, value in replacements.items():
         rendered = rendered.replace("{" + key + "}", value)

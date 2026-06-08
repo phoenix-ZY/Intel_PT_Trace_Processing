@@ -132,6 +132,10 @@ python3 scripts/collect/run_cloud_perf_trace_analysis.py \
 
 These profiles reuse the suite's existing containers and launch wrappers.
 They expect its configured DCPerf checkouts and Docker images to be available.
+Canonical Docker tags live in `colocation-bench-suite/conf/images.env`; cloud
+collection loads them automatically when that checkout is present. You can also
+run `source scripts/source_cbs_images.sh` before launching collectors.
+See `colocation-bench-suite/docs/DOCKER_IMAGES.md` for the build/pull list.
 Override the suite location with `--colocation-bench-suite-dir`. Feedsim uses
 CPUs `0-15` by default because its launcher partitions a zero-based contiguous
 CPU range; override this with the `DCPERF_FEEDSIM_CPUSET` environment variable.
