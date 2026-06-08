@@ -4,7 +4,7 @@
 # Usage:
 #   source scripts/env/source_cbs_images.sh
 #   # or
-#   CBS_ROOT=/path/to/colocation-bench-suite source scripts/env/source_cbs_images.sh
+#   CBS_ROOT=/path/to/colocation-bench-suite source scripts/source_cbs_images.sh
 
 _intel_pt_repo_root() {
   local here
