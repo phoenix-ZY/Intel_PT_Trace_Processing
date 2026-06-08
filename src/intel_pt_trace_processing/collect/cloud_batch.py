@@ -2,9 +2,8 @@
 """
 Cloud Application Intel PT Trace Collector + perf post-analysis.
 
-Cloud-specific workload setup lives in workloads.cloud_runtime/cloud_run; this
-module is the batch driver that parses CLI args, prepares Docker state, launches
-each service config, and optionally runs batch post-processing.
+Workload startup is delegated to colocation-bench-suite/scripts/cloud_workload_lib.py;
+this module is the batch driver for Intel PT collection (cgroup + core) and post-processing.
 """
 
 from __future__ import annotations
@@ -29,13 +28,11 @@ from intel_pt_trace_processing.workloads.cbs_images import default_cbs_root, ens
 from intel_pt_trace_processing.workloads.cloud_runtime import (
     BENCH_CONTAINER,
     NETWORK_NAME,
-    cleanup_all,
     docker_stop_rm,
     load_workload_config_file,
     log,
     merge_config_matrix,
     run_cmd,
-    workload_container_names,
 )
 
 SCRIPT_DIR = REPO_ROOT
@@ -71,7 +68,6 @@ def main():
 
     output_dir = args.output_dir.resolve()
     perf_tool = args.perf_tool.resolve()
-    project_dir = SCRIPT_DIR
 
     if not perf_tool.is_file() or not os.access(perf_tool, os.X_OK):
         sys.exit(f"❌ perf tool not executable: {perf_tool}")
@@ -84,18 +80,20 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    cbs_root = ensure_cbs_image_env() or default_cbs_root()
+    project_dir = cbs_root
+
     all_configs = load_workload_config_file(args.default_workload_config.resolve(), project_dir)
     for config_path in args.workload_config:
         extra_configs = load_workload_config_file(config_path.resolve(), project_dir)
         merge_config_matrix(all_configs, extra_configs)
 
-    cbs_root = ensure_cbs_image_env() or default_cbs_root()
-    cleanup_all(workload_container_names(all_configs))
     scripts_dir = cbs_root / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     import cloud_workload_lib as cwl
 
+    cwl.stop_all_services(all_configs)
     cwl.ensure_cloud_stack(
         cwl.WorkloadContext(
             cbs_root=cbs_root,

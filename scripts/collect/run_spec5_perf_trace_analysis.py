@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""Legacy host-native SPEC PT collector (not aligned with CBS container workloads).
+
+For colocation-aligned SPEC offline PT, use run_offline_perf_trace_analysis.py
+with --mode spec (CBS container + offline_workload_lib).
+"""
 from __future__ import annotations
 
 import sys

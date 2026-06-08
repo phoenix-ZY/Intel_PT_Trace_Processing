@@ -94,10 +94,22 @@ python3 scripts/collect/run_spec5_sde_perf_similarity.py \
 ### 3) Run SPEC batch (perf-only)
 
 ```bash
+# Legacy host-SPEC path (SDE / native runs — not CBS-aligned)
 python3 scripts/collect/run_spec5_perf_trace_analysis.py \
   --warmup-sweep 10,60 \
   --output-base outputs/spec5_perf_trace_only
 ```
+
+For **CBS-aligned** SPEC offline PT (container, same matrix as interference):
+
+```bash
+python3 scripts/collect/run_offline_perf_trace_analysis.py \
+  --cbs-root /path/to/colocation-bench-suite \
+  --mode spec --matrix-variant single_copy \
+  --offline-cpuset 32 --sudo-perf
+```
+
+See `colocation-bench-suite/docs/CBS_IPT_ALIGNMENT.md`.
 
 ### 4) Run cloud apps (perf-only)
 
@@ -128,8 +140,21 @@ Requires a CBS checkout (`--colocation-bench-suite-dir` or
 `COLOCATION_BENCH_SUITE_DIR`). Image tags come from `conf/images.env`.
 See `colocation-bench-suite/docs/DOCKER_IMAGES.md`.
 
-Optional gitignored `workloads.machine.json` plus `--workload-config` overrides
-only PT placement (`target_cpuset`, `warmup_duration_s`, etc.), not service tuning.
+Optional `--workload-config /path/to/overlay.json` (outside IPT repo) overrides
+PT placement (`target_cpuset`, `warmup_duration_s`, etc.), not service tuning.
+
+### 5) Run offline workloads (Intel PT)
+
+Offline startup uses CBS `offline_workload_lib.py`; matrix from
+`scripts/offline_matrix.sh`:
+
+```bash
+python3 scripts/collect/run_offline_perf_trace_analysis.py \
+  --cbs-root /path/to/colocation-bench-suite \
+  --mode smoke --offline-cpuset 32 \
+  --output-dir outputs/offline_trace_smoke \
+  --sudo-perf
+```
 
 JSON fields for trace collection (per service):
 

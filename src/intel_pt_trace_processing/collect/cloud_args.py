@@ -13,9 +13,10 @@ from intel_pt_trace_processing.perf.stream import (
     add_perf_postprocess_args,
     validate_perf_postprocess_args,
 )
-from intel_pt_trace_processing.workloads.cloud_runtime import DEFAULT_WORKLOAD_CONFIG
+from intel_pt_trace_processing.workloads.cbs_images import default_cbs_root
+from intel_pt_trace_processing.workloads.cloud_runtime import default_workload_config_path
 
-DEFAULT_OUTPUT_DIR = Path("/home/huangtianhao/Intel_PT_Trace_Processing/outputs/cloud_trace")
+DEFAULT_OUTPUT_DIR = Path.cwd() / "outputs" / "cloud_trace"
 DEFAULT_PERF_TOOL = Path("/usr/bin/perf")
 DEFAULT_INTERVAL = 30
 DEFAULT_RECORD_DURATION = 0.001
@@ -107,8 +108,8 @@ def build_cloud_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--default-workload-config",
         type=Path,
-        default=DEFAULT_WORKLOAD_CONFIG,
-        help=f"Default JSON workload config file (default: {DEFAULT_WORKLOAD_CONFIG})",
+        default=None,
+        help="CBS workloads.cloud.json (default: $CBS_ROOT/cloud_bench_configs/workloads.cloud.json)",
     )
     parser.add_argument(
         "--workload-config",
@@ -120,8 +121,8 @@ def build_cloud_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--colocation-bench-suite-dir",
         type=Path,
-        default=Path("/home/huangtianhao/colocation-bench-suite"),
-        help="Path used by feedsim/TaoBench command templates.",
+        default=None,
+        help="Path to colocation-bench-suite (default: CBS_ROOT / COLOCATION_BENCH_SUITE_DIR).",
     )
     parser.add_argument(
         "--config-name",
@@ -243,6 +244,10 @@ def build_cloud_arg_parser() -> argparse.ArgumentParser:
 
 def parse_cloud_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = build_cloud_arg_parser().parse_args(argv)
+    if args.colocation_bench_suite_dir is None:
+        args.colocation_bench_suite_dir = default_cbs_root()
+    if args.default_workload_config is None:
+        args.default_workload_config = default_workload_config_path()
     if bool(getattr(args, "perf_stat", False)):
         args.collect_mode = "stat"
     validate_perf_target_args(args)

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Legacy host-native SPEC + SDE path (not CBS container-aligned)."""
 from __future__ import annotations
 
 import sys
@@ -11,7 +10,7 @@ for _path in (REPO_ROOT, SRC_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from intel_pt_trace_processing.collect.spec_batch import main
+from intel_pt_trace_processing.collect.offline_batch import main
 
 
 if __name__ == "__main__":
