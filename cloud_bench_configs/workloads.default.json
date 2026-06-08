@@ -8,9 +8,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-redis",
-          "start_cmd": "docker run -d --name target-redis {target_cpuset_arg}--network perf-net --ip 172.30.0.10 ${DOCKER_REDIS_IMAGE:-redis:7.2-alpine} redis-server --save '' --appendonly no"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-redis SERVER_CPUSET={target_cpuset} bash {colocation_bench_suite_dir}/online/redis/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.10 -p 6379 -c 50 --pipeline 32 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=50 MEMTIER_PIPELINE=32 bash {colocation_bench_suite_dir}/online/redis/run_load.sh {bench_duration}"
       },
       {
         "config_name": "lowload",
@@ -19,9 +19,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-redis",
-          "start_cmd": "docker run -d --name target-redis {target_cpuset_arg}--network perf-net --ip 172.30.0.10 ${DOCKER_REDIS_IMAGE:-redis:7.2-alpine} redis-server --save '' --appendonly no"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-redis SERVER_CPUSET={target_cpuset} bash {colocation_bench_suite_dir}/online/redis/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.10 -p 6379 -c 10 --pipeline 8 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=10 MEMTIER_PIPELINE=8 bash {colocation_bench_suite_dir}/online/redis/run_load.sh {bench_duration}"
       },
       {
         "config_name": "highload",
@@ -30,9 +30,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-redis",
-          "start_cmd": "docker run -d --name target-redis {target_cpuset_arg}--network perf-net --ip 172.30.0.10 ${DOCKER_REDIS_IMAGE:-redis:7.2-alpine} redis-server --save '' --appendonly no"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-redis SERVER_CPUSET={target_cpuset} bash {colocation_bench_suite_dir}/online/redis/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.10 -p 6379 -c 200 --pipeline 64 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=200 MEMTIER_PIPELINE=64 bash {colocation_bench_suite_dir}/online/redis/run_load.sh {bench_duration}"
       },
       {
         "config_name": "aof",
@@ -41,9 +41,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-redis",
-          "start_cmd": "docker run -d --name target-redis {target_cpuset_arg}--network perf-net --ip 172.30.0.10 ${DOCKER_REDIS_IMAGE:-redis:7.2-alpine} redis-server --save '' --appendonly yes --appendfsync everysec"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-redis SERVER_CPUSET={target_cpuset} REDIS_APPENDONLY=yes bash {colocation_bench_suite_dir}/online/redis/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.10 -p 6379 -c 50 --pipeline 32 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=50 MEMTIER_PIPELINE=32 bash {colocation_bench_suite_dir}/online/redis/run_load.sh {bench_duration}"
       },
       {
         "config_name": "maxmem256m",
@@ -52,9 +52,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-redis",
-          "start_cmd": "docker run -d --name target-redis {target_cpuset_arg}--network perf-net --ip 172.30.0.10 ${DOCKER_REDIS_IMAGE:-redis:7.2-alpine} redis-server --save '' --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-redis SERVER_CPUSET={target_cpuset} REDIS_MAXMEMORY=256mb bash {colocation_bench_suite_dir}/online/redis/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.10 -p 6379 -c 50 --pipeline 32 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=50 MEMTIER_PIPELINE=32 bash {colocation_bench_suite_dir}/online/redis/run_load.sh {bench_duration}"
       }
     ],
     "nginx": [
@@ -65,9 +65,16 @@
         "target_role": {
           "name": "server",
           "container_name": "target-nginx",
-          "start_cmd": "docker run -d --name target-nginx {target_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf.template:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine} sh -lc 'sed -E \"s/^worker_processes[[:space:]].*;/worker_processes 1;/\" /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g \"daemon off;\"'"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-nginx SERVER_CPUSET={target_cpuset} NGINX_WORKER_PROCESSES=1 bash {colocation_bench_suite_dir}/online/nginx/start_server.sh"
         },
-        "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 60}],
+        "ready_checks": [
+          {
+            "type": "nginx_http",
+            "host": "172.30.0.11",
+            "path": "/index.html",
+            "timeout_s": 60
+          }
+        ],
         "load_cmd": "docker exec bench-client wrk -t2 -c 30 -d {bench_duration}s http://172.30.0.11:80/index.html"
       },
       {
@@ -77,9 +84,16 @@
         "target_role": {
           "name": "server",
           "container_name": "target-nginx",
-          "start_cmd": "docker run -d --name target-nginx {target_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf.template:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine} sh -lc 'sed -E \"s/^worker_processes[[:space:]].*;/worker_processes 4;/\" /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g \"daemon off;\"'"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-nginx SERVER_CPUSET={target_cpuset} NGINX_WORKER_PROCESSES=4 bash {colocation_bench_suite_dir}/online/nginx/start_server.sh"
         },
-        "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 60}],
+        "ready_checks": [
+          {
+            "type": "nginx_http",
+            "host": "172.30.0.11",
+            "path": "/index.html",
+            "timeout_s": 60
+          }
+        ],
         "load_cmd": "docker exec bench-client wrk -t2 -c 50 -d {bench_duration}s http://172.30.0.11:80/index.html"
       },
       {
@@ -89,9 +103,16 @@
         "target_role": {
           "name": "server",
           "container_name": "target-nginx",
-          "start_cmd": "docker run -d --name target-nginx {target_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf.template:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine} sh -lc 'sed -E \"s/^worker_processes[[:space:]].*;/worker_processes 8;/\" /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g \"daemon off;\"'"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-nginx SERVER_CPUSET={target_cpuset} NGINX_WORKER_PROCESSES=8 bash {colocation_bench_suite_dir}/online/nginx/start_server.sh"
         },
-        "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 60}],
+        "ready_checks": [
+          {
+            "type": "nginx_http",
+            "host": "172.30.0.11",
+            "path": "/index.html",
+            "timeout_s": 60
+          }
+        ],
         "load_cmd": "docker exec bench-client wrk -t4 -c 200 -d {bench_duration}s http://172.30.0.11:80/index.html"
       },
       {
@@ -101,9 +122,16 @@
         "target_role": {
           "name": "server",
           "container_name": "target-nginx",
-          "start_cmd": "docker run -d --name target-nginx {target_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf.template:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine} sh -lc 'sed -E \"s/^worker_processes[[:space:]].*;/worker_processes 4;/\" /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g \"daemon off;\"'"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-nginx SERVER_CPUSET={target_cpuset} NGINX_WORKER_PROCESSES=4 bash {colocation_bench_suite_dir}/online/nginx/start_server.sh"
         },
-        "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 60}],
+        "ready_checks": [
+          {
+            "type": "nginx_http",
+            "host": "172.30.0.11",
+            "path": "/index.html",
+            "timeout_s": 60
+          }
+        ],
         "load_cmd": "docker exec bench-client wrk -t2 -c 80 -d {bench_duration}s http://172.30.0.11:80/1k.bin"
       },
       {
@@ -113,9 +141,16 @@
         "target_role": {
           "name": "server",
           "container_name": "target-nginx",
-          "start_cmd": "docker run -d --name target-nginx {target_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf.template:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine} sh -lc 'sed -E \"s/^worker_processes[[:space:]].*;/worker_processes 4;/\" /etc/nginx/nginx.conf.template > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g \"daemon off;\"'"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-nginx SERVER_CPUSET={target_cpuset} NGINX_WORKER_PROCESSES=4 bash {colocation_bench_suite_dir}/online/nginx/start_server.sh"
         },
-        "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 60}],
+        "ready_checks": [
+          {
+            "type": "nginx_http",
+            "host": "172.30.0.11",
+            "path": "/index.html",
+            "timeout_s": 60
+          }
+        ],
         "load_cmd": "docker exec bench-client wrk -t2 -c 30 -d {bench_duration}s http://172.30.0.11:80/64k.bin"
       }
     ],
@@ -128,14 +163,21 @@
           {
             "name": "nginx_backend",
             "container_name": "target-nginx-helper",
-            "start_cmd": "docker run -d --name target-nginx-helper {helper_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine}",
-            "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 30}]
+            "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} HELPER_CONTAINER=target-nginx-helper HELPER_CPUSET={helper_cpuset} NGINX_WORKER_PROCESSES=8 bash {colocation_bench_suite_dir}/online/haproxy/start_helper_nginx.sh",
+            "ready_checks": [
+              {
+                "type": "nginx_http",
+                "host": "172.30.0.11",
+                "path": "/index.html",
+                "timeout_s": 30
+              }
+            ]
           }
         ],
         "target_role": {
           "name": "server",
           "container_name": "target-haproxy",
-          "start_cmd": "docker run -d --name target-haproxy {target_cpuset_arg}--network perf-net --ip 172.30.0.14 -v {project_dir}/cloud_bench_configs/haproxy-http.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro ${DOCKER_HAPROXY_IMAGE:-haproxy:2.8}"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-haproxy SERVER_CPUSET={target_cpuset} HAPROXY_NBTHREAD=8 bash {colocation_bench_suite_dir}/online/haproxy/start_server.sh"
         },
         "load_cmd": "docker exec bench-client wrk -t2 -c 30 -d {bench_duration}s http://172.30.0.14:9000/"
       },
@@ -147,14 +189,21 @@
           {
             "name": "nginx_backend",
             "container_name": "target-nginx-helper",
-            "start_cmd": "docker run -d --name target-nginx-helper {helper_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine}",
-            "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 30}]
+            "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} HELPER_CONTAINER=target-nginx-helper HELPER_CPUSET={helper_cpuset} NGINX_WORKER_PROCESSES=8 bash {colocation_bench_suite_dir}/online/haproxy/start_helper_nginx.sh",
+            "ready_checks": [
+              {
+                "type": "nginx_http",
+                "host": "172.30.0.11",
+                "path": "/index.html",
+                "timeout_s": 30
+              }
+            ]
           }
         ],
         "target_role": {
           "name": "server",
           "container_name": "target-haproxy",
-          "start_cmd": "docker run -d --name target-haproxy {target_cpuset_arg}--network perf-net --ip 172.30.0.14 -v {project_dir}/cloud_bench_configs/haproxy-http.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro ${DOCKER_HAPROXY_IMAGE:-haproxy:2.8}"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-haproxy SERVER_CPUSET={target_cpuset} HAPROXY_NBTHREAD=8 bash {colocation_bench_suite_dir}/online/haproxy/start_server.sh"
         },
         "load_cmd": "docker exec bench-client wrk -t2 -c 100 -d {bench_duration}s http://172.30.0.14:9000/"
       },
@@ -166,14 +215,21 @@
           {
             "name": "nginx_backend",
             "container_name": "target-nginx-helper",
-            "start_cmd": "docker run -d --name target-nginx-helper {helper_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine}",
-            "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 30}]
+            "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} HELPER_CONTAINER=target-nginx-helper HELPER_CPUSET={helper_cpuset} NGINX_WORKER_PROCESSES=8 bash {colocation_bench_suite_dir}/online/haproxy/start_helper_nginx.sh",
+            "ready_checks": [
+              {
+                "type": "nginx_http",
+                "host": "172.30.0.11",
+                "path": "/index.html",
+                "timeout_s": 30
+              }
+            ]
           }
         ],
         "target_role": {
           "name": "server",
           "container_name": "target-haproxy",
-          "start_cmd": "docker run -d --name target-haproxy {target_cpuset_arg}--network perf-net --ip 172.30.0.14 -v {project_dir}/cloud_bench_configs/haproxy-http.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro ${DOCKER_HAPROXY_IMAGE:-haproxy:2.8}"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-haproxy SERVER_CPUSET={target_cpuset} HAPROXY_NBTHREAD=8 bash {colocation_bench_suite_dir}/online/haproxy/start_server.sh"
         },
         "load_cmd": "docker exec bench-client wrk -t4 -c 400 -d {bench_duration}s http://172.30.0.14:9000/"
       },
@@ -185,14 +241,21 @@
           {
             "name": "nginx_backend",
             "container_name": "target-nginx-helper",
-            "start_cmd": "docker run -d --name target-nginx-helper {helper_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine}",
-            "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 30}]
+            "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} HELPER_CONTAINER=target-nginx-helper HELPER_CPUSET={helper_cpuset} NGINX_WORKER_PROCESSES=8 bash {colocation_bench_suite_dir}/online/haproxy/start_helper_nginx.sh",
+            "ready_checks": [
+              {
+                "type": "nginx_http",
+                "host": "172.30.0.11",
+                "path": "/index.html",
+                "timeout_s": 30
+              }
+            ]
           }
         ],
         "target_role": {
           "name": "server",
           "container_name": "target-haproxy",
-          "start_cmd": "docker run -d --name target-haproxy {target_cpuset_arg}--network perf-net --ip 172.30.0.14 -v {project_dir}/cloud_bench_configs/haproxy-http.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro ${DOCKER_HAPROXY_IMAGE:-haproxy:2.8}"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-haproxy SERVER_CPUSET={target_cpuset} HAPROXY_NBTHREAD=8 bash {colocation_bench_suite_dir}/online/haproxy/start_server.sh"
         },
         "load_cmd": "docker exec bench-client wrk -t2 -c 150 -d {bench_duration}s http://172.30.0.14:9000/1k.bin"
       },
@@ -204,14 +267,21 @@
           {
             "name": "nginx_backend",
             "container_name": "target-nginx-helper",
-            "start_cmd": "docker run -d --name target-nginx-helper {helper_cpuset_arg}--network perf-net --ip 172.30.0.11 -v {project_dir}/www:/usr/share/nginx/html:ro -v {project_dir}/cloud_bench_configs/nginx-http.conf:/etc/nginx/nginx.conf:ro ${DOCKER_NGINX_IMAGE:-nginx:alpine}",
-            "ready_checks": [{"type": "nginx_http", "host": "172.30.0.11", "path": "/index.html", "timeout_s": 30}]
+            "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} HELPER_CONTAINER=target-nginx-helper HELPER_CPUSET={helper_cpuset} NGINX_WORKER_PROCESSES=8 bash {colocation_bench_suite_dir}/online/haproxy/start_helper_nginx.sh",
+            "ready_checks": [
+              {
+                "type": "nginx_http",
+                "host": "172.30.0.11",
+                "path": "/index.html",
+                "timeout_s": 30
+              }
+            ]
           }
         ],
         "target_role": {
           "name": "server",
           "container_name": "target-haproxy",
-          "start_cmd": "docker run -d --name target-haproxy {target_cpuset_arg}--network perf-net --ip 172.30.0.14 -v {project_dir}/cloud_bench_configs/haproxy-http.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro ${DOCKER_HAPROXY_IMAGE:-haproxy:2.8}"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net CBS_CLOUD_PROJECT_DIR={project_dir} SIMPLE_SERVER_CONTAINER=target-haproxy SERVER_CPUSET={target_cpuset} HAPROXY_NBTHREAD=8 bash {colocation_bench_suite_dir}/online/haproxy/start_server.sh"
         },
         "load_cmd": "docker exec bench-client wrk -t2 -c 50 -d {bench_duration}s http://172.30.0.14:9000/64k.bin"
       }
@@ -224,11 +294,18 @@
         "target_role": {
           "name": "server",
           "container_name": "target-postgres",
-          "start_cmd": "docker run -d --name target-postgres {target_cpuset_arg}--network perf-net --ip 172.30.0.16 -e POSTGRES_PASSWORD=password ${DOCKER_POSTGRES_IMAGE:-postgres:15-alpine} postgres -c shared_buffers=128MB"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-postgres SERVER_CPUSET={target_cpuset} bash {colocation_bench_suite_dir}/online/postgres/start_server.sh"
         },
-        "prepare_steps": [{"type": "pgbench_init", "container_name": "target-postgres", "cmd": "pgbench -i -s 2 -U postgres postgres", "settle_s": 3}],
+        "prepare_steps": [
+          {
+            "type": "pgbench_init",
+            "container_name": "target-postgres",
+            "cmd": "PGBENCH_SCALE=2 bash {colocation_bench_suite_dir}/online/postgres/run_prepare.sh",
+            "settle_s": 3
+          }
+        ],
         "startup_wait_s": 10,
-        "load_cmd": "docker exec target-postgres pgbench -c 2 -j 2 -T {bench_duration} -N -h localhost -U postgres postgres"
+        "load_cmd": "PGBENCH_CLIENTS=2 PGBENCH_JOBS=2 bash {colocation_bench_suite_dir}/online/postgres/run_load.sh {bench_duration}"
       },
       {
         "config_name": "buf512_c4",
@@ -237,11 +314,18 @@
         "target_role": {
           "name": "server",
           "container_name": "target-postgres",
-          "start_cmd": "docker run -d --name target-postgres {target_cpuset_arg}--network perf-net --ip 172.30.0.16 -e POSTGRES_PASSWORD=password ${DOCKER_POSTGRES_IMAGE:-postgres:15-alpine} postgres -c shared_buffers=512MB"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-postgres SERVER_CPUSET={target_cpuset} bash {colocation_bench_suite_dir}/online/postgres/start_server.sh"
         },
-        "prepare_steps": [{"type": "pgbench_init", "container_name": "target-postgres", "cmd": "pgbench -i -s 2 -U postgres postgres", "settle_s": 3}],
+        "prepare_steps": [
+          {
+            "type": "pgbench_init",
+            "container_name": "target-postgres",
+            "cmd": "PGBENCH_SCALE=2 bash {colocation_bench_suite_dir}/online/postgres/run_prepare.sh",
+            "settle_s": 3
+          }
+        ],
         "startup_wait_s": 10,
-        "load_cmd": "docker exec target-postgres pgbench -c 4 -j 2 -T {bench_duration} -N -h localhost -U postgres postgres"
+        "load_cmd": "PGBENCH_CLIENTS=4 PGBENCH_JOBS=2 bash {colocation_bench_suite_dir}/online/postgres/run_load.sh {bench_duration}"
       },
       {
         "config_name": "buf1g_c8",
@@ -250,11 +334,18 @@
         "target_role": {
           "name": "server",
           "container_name": "target-postgres",
-          "start_cmd": "docker run -d --name target-postgres {target_cpuset_arg}--network perf-net --ip 172.30.0.16 -e POSTGRES_PASSWORD=password ${DOCKER_POSTGRES_IMAGE:-postgres:15-alpine} postgres -c shared_buffers=1GB"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-postgres SERVER_CPUSET={target_cpuset} bash {colocation_bench_suite_dir}/online/postgres/start_server.sh"
         },
-        "prepare_steps": [{"type": "pgbench_init", "container_name": "target-postgres", "cmd": "pgbench -i -s 2 -U postgres postgres", "settle_s": 3}],
+        "prepare_steps": [
+          {
+            "type": "pgbench_init",
+            "container_name": "target-postgres",
+            "cmd": "PGBENCH_SCALE=2 bash {colocation_bench_suite_dir}/online/postgres/run_prepare.sh",
+            "settle_s": 3
+          }
+        ],
         "startup_wait_s": 10,
-        "load_cmd": "docker exec target-postgres pgbench -c 8 -j 4 -T {bench_duration} -N -h localhost -U postgres postgres"
+        "load_cmd": "PGBENCH_CLIENTS=8 PGBENCH_JOBS=4 bash {colocation_bench_suite_dir}/online/postgres/run_load.sh {bench_duration}"
       },
       {
         "config_name": "ro_c8",
@@ -263,11 +354,18 @@
         "target_role": {
           "name": "server",
           "container_name": "target-postgres",
-          "start_cmd": "docker run -d --name target-postgres {target_cpuset_arg}--network perf-net --ip 172.30.0.16 -e POSTGRES_PASSWORD=password ${DOCKER_POSTGRES_IMAGE:-postgres:15-alpine} postgres -c shared_buffers=512MB"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-postgres SERVER_CPUSET={target_cpuset} bash {colocation_bench_suite_dir}/online/postgres/start_server.sh"
         },
-        "prepare_steps": [{"type": "pgbench_init", "container_name": "target-postgres", "cmd": "pgbench -i -s 2 -U postgres postgres", "settle_s": 3}],
+        "prepare_steps": [
+          {
+            "type": "pgbench_init",
+            "container_name": "target-postgres",
+            "cmd": "PGBENCH_SCALE=2 bash {colocation_bench_suite_dir}/online/postgres/run_prepare.sh",
+            "settle_s": 3
+          }
+        ],
         "startup_wait_s": 10,
-        "load_cmd": "docker exec target-postgres pgbench -c 8 -j 4 -T {bench_duration} -S -h localhost -U postgres postgres"
+        "load_cmd": "PGBENCH_CLIENTS=8 PGBENCH_JOBS=4 bash {colocation_bench_suite_dir}/online/postgres/run_load.sh {bench_duration}"
       },
       {
         "config_name": "rw_c8",
@@ -276,11 +374,18 @@
         "target_role": {
           "name": "server",
           "container_name": "target-postgres",
-          "start_cmd": "docker run -d --name target-postgres {target_cpuset_arg}--network perf-net --ip 172.30.0.16 -e POSTGRES_PASSWORD=password ${DOCKER_POSTGRES_IMAGE:-postgres:15-alpine} postgres -c shared_buffers=512MB"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-postgres SERVER_CPUSET={target_cpuset} bash {colocation_bench_suite_dir}/online/postgres/start_server.sh"
         },
-        "prepare_steps": [{"type": "pgbench_init", "container_name": "target-postgres", "cmd": "pgbench -i -s 2 -U postgres postgres", "settle_s": 3}],
+        "prepare_steps": [
+          {
+            "type": "pgbench_init",
+            "container_name": "target-postgres",
+            "cmd": "PGBENCH_SCALE=2 bash {colocation_bench_suite_dir}/online/postgres/run_prepare.sh",
+            "settle_s": 3
+          }
+        ],
         "startup_wait_s": 10,
-        "load_cmd": "docker exec target-postgres pgbench -c 8 -j 4 -T {bench_duration} -h localhost -U postgres postgres"
+        "load_cmd": "PGBENCH_CLIENTS=8 PGBENCH_JOBS=4 bash {colocation_bench_suite_dir}/online/postgres/run_load.sh {bench_duration}"
       }
     ],
     "mysql": [
@@ -291,11 +396,27 @@
         "target_role": {
           "name": "server",
           "container_name": "target-mysql",
-          "start_cmd": "docker run -d --name target-mysql {target_cpuset_arg}--network perf-net --ip 172.30.0.12 -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=test ${DOCKER_MYSQL_IMAGE:-mysql:8.0} --innodb-buffer-pool-size=256M"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-mysql SERVER_CPUSET={target_cpuset} MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test MYSQL_INNODB_BUFFER_POOL=256M bash {colocation_bench_suite_dir}/online/mysql/start_server.sh"
         },
-        "ready_checks": [{"type": "mysql_container", "container_name": "target-mysql", "timeout_s": 90}, {"type": "mysql_bench_client", "host": "172.30.0.12", "timeout_s": 120}],
-        "prepare_steps": [{"type": "sysbench_mysql_prepare", "cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=8 prepare\""}],
-        "load_cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=8 --time={bench_duration} --report-interval=10 run; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=8 cleanup >/dev/null\""
+        "ready_checks": [
+          {
+            "type": "mysql_container",
+            "container_name": "target-mysql",
+            "timeout_s": 90
+          },
+          {
+            "type": "mysql_bench_client",
+            "host": "172.30.0.12",
+            "timeout_s": 120
+          }
+        ],
+        "prepare_steps": [
+          {
+            "type": "sysbench_mysql_prepare",
+            "cmd": "SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=8 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_prepare.sh"
+          }
+        ],
+        "load_cmd": "CBS_BENCH_MODE=exec SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=8 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_load.sh {bench_duration}"
       },
       {
         "config_name": "buf256m_t32",
@@ -304,11 +425,27 @@
         "target_role": {
           "name": "server",
           "container_name": "target-mysql",
-          "start_cmd": "docker run -d --name target-mysql {target_cpuset_arg}--network perf-net --ip 172.30.0.12 -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=test ${DOCKER_MYSQL_IMAGE:-mysql:8.0} --innodb-buffer-pool-size=256M"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-mysql SERVER_CPUSET={target_cpuset} MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test MYSQL_INNODB_BUFFER_POOL=256M bash {colocation_bench_suite_dir}/online/mysql/start_server.sh"
         },
-        "ready_checks": [{"type": "mysql_container", "container_name": "target-mysql", "timeout_s": 90}, {"type": "mysql_bench_client", "host": "172.30.0.12", "timeout_s": 120}],
-        "prepare_steps": [{"type": "sysbench_mysql_prepare", "cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=32 prepare\""}],
-        "load_cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=32 --time={bench_duration} --report-interval=10 run; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=32 cleanup >/dev/null\""
+        "ready_checks": [
+          {
+            "type": "mysql_container",
+            "container_name": "target-mysql",
+            "timeout_s": 90
+          },
+          {
+            "type": "mysql_bench_client",
+            "host": "172.30.0.12",
+            "timeout_s": 120
+          }
+        ],
+        "prepare_steps": [
+          {
+            "type": "sysbench_mysql_prepare",
+            "cmd": "SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=32 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_prepare.sh"
+          }
+        ],
+        "load_cmd": "CBS_BENCH_MODE=exec SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=32 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_load.sh {bench_duration}"
       },
       {
         "config_name": "buf1g_t16",
@@ -317,11 +454,27 @@
         "target_role": {
           "name": "server",
           "container_name": "target-mysql",
-          "start_cmd": "docker run -d --name target-mysql {target_cpuset_arg}--network perf-net --ip 172.30.0.12 -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=test ${DOCKER_MYSQL_IMAGE:-mysql:8.0} --innodb-buffer-pool-size=1G"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-mysql SERVER_CPUSET={target_cpuset} MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test MYSQL_INNODB_BUFFER_POOL=1G bash {colocation_bench_suite_dir}/online/mysql/start_server.sh"
         },
-        "ready_checks": [{"type": "mysql_container", "container_name": "target-mysql", "timeout_s": 90}, {"type": "mysql_bench_client", "host": "172.30.0.12", "timeout_s": 120}],
-        "prepare_steps": [{"type": "sysbench_mysql_prepare", "cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=16 prepare\""}],
-        "load_cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=16 --time={bench_duration} --report-interval=10 run; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=16 cleanup >/dev/null\""
+        "ready_checks": [
+          {
+            "type": "mysql_container",
+            "container_name": "target-mysql",
+            "timeout_s": 90
+          },
+          {
+            "type": "mysql_bench_client",
+            "host": "172.30.0.12",
+            "timeout_s": 120
+          }
+        ],
+        "prepare_steps": [
+          {
+            "type": "sysbench_mysql_prepare",
+            "cmd": "SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=16 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_prepare.sh"
+          }
+        ],
+        "load_cmd": "CBS_BENCH_MODE=exec SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=16 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_load.sh {bench_duration}"
       },
       {
         "config_name": "t64",
@@ -330,11 +483,27 @@
         "target_role": {
           "name": "server",
           "container_name": "target-mysql",
-          "start_cmd": "docker run -d --name target-mysql {target_cpuset_arg}--network perf-net --ip 172.30.0.12 -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=test ${DOCKER_MYSQL_IMAGE:-mysql:8.0} --innodb-buffer-pool-size=512M"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-mysql SERVER_CPUSET={target_cpuset} MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test MYSQL_INNODB_BUFFER_POOL=512M bash {colocation_bench_suite_dir}/online/mysql/start_server.sh"
         },
-        "ready_checks": [{"type": "mysql_container", "container_name": "target-mysql", "timeout_s": 90}, {"type": "mysql_bench_client", "host": "172.30.0.12", "timeout_s": 120}],
-        "prepare_steps": [{"type": "sysbench_mysql_prepare", "cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=64 prepare\""}],
-        "load_cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=64 --time={bench_duration} --report-interval=10 run; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=64 cleanup >/dev/null\""
+        "ready_checks": [
+          {
+            "type": "mysql_container",
+            "container_name": "target-mysql",
+            "timeout_s": 90
+          },
+          {
+            "type": "mysql_bench_client",
+            "host": "172.30.0.12",
+            "timeout_s": 120
+          }
+        ],
+        "prepare_steps": [
+          {
+            "type": "sysbench_mysql_prepare",
+            "cmd": "SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=64 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_prepare.sh"
+          }
+        ],
+        "load_cmd": "CBS_BENCH_MODE=exec SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=64 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_load.sh {bench_duration}"
       },
       {
         "config_name": "classic",
@@ -343,11 +512,27 @@
         "target_role": {
           "name": "server",
           "container_name": "target-mysql",
-          "start_cmd": "docker run -d --name target-mysql {target_cpuset_arg}--network perf-net --ip 172.30.0.12 -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=test ${DOCKER_MYSQL_IMAGE:-mysql:8.0} --innodb-buffer-pool-size=512M"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-mysql SERVER_CPUSET={target_cpuset} MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test MYSQL_INNODB_BUFFER_POOL=512M bash {colocation_bench_suite_dir}/online/mysql/start_server.sh"
         },
-        "ready_checks": [{"type": "mysql_container", "container_name": "target-mysql", "timeout_s": 90}, {"type": "mysql_bench_client", "host": "172.30.0.12", "timeout_s": 120}],
-        "prepare_steps": [{"type": "sysbench_mysql_prepare", "cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=16 prepare\""}],
-        "load_cmd": "docker exec bench-client sh -lc \"set -e; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=16 --time={bench_duration} --report-interval=10 run; sysbench oltp_read_write --db-driver=mysql --mysql-host=172.30.0.12 --mysql-user=root --mysql-password=password --mysql-db=test --mysql-ssl=off --tables=8 --table-size=10000 --threads=16 cleanup >/dev/null\""
+        "ready_checks": [
+          {
+            "type": "mysql_container",
+            "container_name": "target-mysql",
+            "timeout_s": 90
+          },
+          {
+            "type": "mysql_bench_client",
+            "host": "172.30.0.12",
+            "timeout_s": 120
+          }
+        ],
+        "prepare_steps": [
+          {
+            "type": "sysbench_mysql_prepare",
+            "cmd": "SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=16 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_prepare.sh"
+          }
+        ],
+        "load_cmd": "CBS_BENCH_MODE=exec SYSBENCH_TABLES=8 SYSBENCH_TABLE_SIZE=10000 SYSBENCH_THREADS=16 MYSQL_ROOT_PASSWORD=password MYSQL_DATABASE=test bash {colocation_bench_suite_dir}/online/mysql/run_load.sh {bench_duration}"
       }
     ],
     "memcached": [
@@ -358,9 +543,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-memcached",
-          "start_cmd": "docker run -d --name target-memcached {target_cpuset_arg}--network perf-net --ip 172.30.0.13 ${DOCKER_MEMCACHED_IMAGE:-memcached:1.6} -m 64 -t 2"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-memcached SERVER_CPUSET={target_cpuset} MEMCACHED_MEMORY_MB=64 MEMCACHED_THREADS=2 bash {colocation_bench_suite_dir}/online/memcached/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.13 -p 11211 --protocol=memcache_binary -c 20 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=20 bash {colocation_bench_suite_dir}/online/memcached/run_load.sh {bench_duration}"
       },
       {
         "config_name": "m256_t4",
@@ -369,9 +554,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-memcached",
-          "start_cmd": "docker run -d --name target-memcached {target_cpuset_arg}--network perf-net --ip 172.30.0.13 ${DOCKER_MEMCACHED_IMAGE:-memcached:1.6} -m 256 -t 4"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-memcached SERVER_CPUSET={target_cpuset} MEMCACHED_MEMORY_MB=256 MEMCACHED_THREADS=4 bash {colocation_bench_suite_dir}/online/memcached/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.13 -p 11211 --protocol=memcache_binary -c 50 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=50 bash {colocation_bench_suite_dir}/online/memcached/run_load.sh {bench_duration}"
       },
       {
         "config_name": "m512_t4",
@@ -380,9 +565,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-memcached",
-          "start_cmd": "docker run -d --name target-memcached {target_cpuset_arg}--network perf-net --ip 172.30.0.13 ${DOCKER_MEMCACHED_IMAGE:-memcached:1.6} -m 512 -t 4"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-memcached SERVER_CPUSET={target_cpuset} MEMCACHED_MEMORY_MB=512 MEMCACHED_THREADS=4 bash {colocation_bench_suite_dir}/online/memcached/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.13 -p 11211 --protocol=memcache_binary -c 50 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=50 bash {colocation_bench_suite_dir}/online/memcached/run_load.sh {bench_duration}"
       },
       {
         "config_name": "m256_t8",
@@ -391,9 +576,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-memcached",
-          "start_cmd": "docker run -d --name target-memcached {target_cpuset_arg}--network perf-net --ip 172.30.0.13 ${DOCKER_MEMCACHED_IMAGE:-memcached:1.6} -m 256 -t 8"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-memcached SERVER_CPUSET={target_cpuset} MEMCACHED_MEMORY_MB=256 MEMCACHED_THREADS=8 bash {colocation_bench_suite_dir}/online/memcached/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.13 -p 11211 --protocol=memcache_binary -c 80 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=80 bash {colocation_bench_suite_dir}/online/memcached/run_load.sh {bench_duration}"
       },
       {
         "config_name": "m256_t4_high",
@@ -402,9 +587,9 @@
         "target_role": {
           "name": "server",
           "container_name": "target-memcached",
-          "start_cmd": "docker run -d --name target-memcached {target_cpuset_arg}--network perf-net --ip 172.30.0.13 ${DOCKER_MEMCACHED_IMAGE:-memcached:1.6} -m 256 -t 4"
+          "start_cmd": "CBS_NETWORK_MODE=perf-net SIMPLE_SERVER_CONTAINER=target-memcached SERVER_CPUSET={target_cpuset} MEMCACHED_MEMORY_MB=256 MEMCACHED_THREADS=4 bash {colocation_bench_suite_dir}/online/memcached/start_server.sh"
         },
-        "load_cmd": "docker exec bench-client memtier_benchmark -s 172.30.0.13 -p 11211 --protocol=memcache_binary -c 200 --test-time {bench_duration}"
+        "load_cmd": "CBS_BENCH_MODE=exec MEMTIER_CLIENTS=200 bash {colocation_bench_suite_dir}/online/memcached/run_load.sh {bench_duration}"
       }
     ],
     "taobench": [
