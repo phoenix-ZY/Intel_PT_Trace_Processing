@@ -26,7 +26,7 @@ responsibility boundaries.
   - Outputs: per-case `report/<prefix>.trace_profile.json` + batch `summary.json`/`summary.csv`
 
 - `scripts/collect/run_cloud_perf_trace_analysis.py`
-  - Runs classic cloud services and benchmark clients in Docker (redis/nginx/haproxy/postgres/mysql/memcached, etc.)
+  - Runs eight cloud online services in Docker (nginx, redis, mysql, haproxy, postgres, memcached, taobench, feedsim split)
   - Pins the target workload to one CPU/core and captures only its Docker cgroup with `perf -a -C <cpu> -G <cgroup>`
   - `sudo perf record` stores container binaries in root's build-id cache; the cache is verified before each container is removed
   - After all collection finishes, runs parallel `sudo perf script` jobs from that cache
@@ -101,69 +101,43 @@ python3 scripts/collect/run_spec5_perf_trace_analysis.py \
 
 ### 4) Run cloud apps (perf-only)
 
+Eight online workloads (nginx, redis, mysql, haproxy, postgres, memcached,
+taobench, feedsim split) share one profile with CBS experiments. Service tuning
+is in `colocation-bench-suite/conf/profiles/cloud_realistic.env`; workload wiring
+and startup use CBS `cloud_bench_configs/workloads.cloud.json` and
+`scripts/cloud_workload_lib.py` (one `config_name: cloud` per service).
+
 ```bash
 python3 scripts/collect/run_cloud_perf_trace_analysis.py \
   --output-dir outputs/cloud_trace \
   --service nginx \
-  --config-name w1_small \
-  --perf-cpu 6 \
-  --target-cpuset 6 \
+  --perf-cpus 0-7 \
+  --target-cpuset 0-7 \
   --sudo-perf
 ```
 
-The default workload matrix also includes TaoBench and DCPerf v2 Feedsim
-profiles backed by `/home/huangtianhao/colocation-bench-suite`:
+Run all eight services:
 
 ```bash
 python3 scripts/collect/run_cloud_perf_trace_analysis.py \
-  --service taobench \
-  --config-name clients16 \
-  --perf-cpu 6 \
-  --target-cpuset 6 \
-  --helper-cpuset 7-10 \
-  --sudo-perf
-
-python3 scripts/collect/run_cloud_perf_trace_analysis.py \
-  --service feedsim \
-  --config-name qps100 \
-  --perf-cpu 6 \
-  --sudo-perf
-```
-
-These profiles reuse the suite's existing containers and launch wrappers.
-They expect its configured DCPerf checkouts and Docker images to be available.
-Canonical Docker tags live in `colocation-bench-suite/conf/images.env`; cloud
-collection loads them automatically when that checkout is present. You can also
-run `source scripts/source_cbs_images.sh` before launching collectors.
-See `colocation-bench-suite/docs/DOCKER_IMAGES.md` for the build/pull list.
-Override the suite location with `--colocation-bench-suite-dir`. Feedsim uses
-CPUs `0-15` by default because its launcher partitions a zero-based contiguous
-CPU range; override this with the `DCPERF_FEEDSIM_CPUSET` environment variable.
-
-For a measurement-oriented matrix with one multi-core profile per service, use:
-
-```bash
-python3 scripts/collect/run_cloud_perf_trace_analysis.py \
-  --default-workload-config cloud_bench_configs/workloads.machine.json \
   --service all \
   --sudo-perf
 ```
 
-`workloads.machine.example.json` is the version-controlled template.
-`workloads.machine.json` contains host-specific paths/images and is ignored by
-git. A workload entry can override these collection settings:
+Requires a CBS checkout (`--colocation-bench-suite-dir` or
+`COLOCATION_BENCH_SUITE_DIR`). Image tags come from `conf/images.env`.
+See `colocation-bench-suite/docs/DOCKER_IMAGES.md`.
 
-- `target_cpuset`: CPUs assigned to the target container.
-- `perf_cpus`: CPU list passed to `perf -C`; use the same CPUs as the target.
-- `bench_cpuset` / `helper_cpuset`: CPUs used by load generators and helpers.
-- `warmup_duration_s`: delay after starting load and before the first trace.
-- `bench_duration_s`: load duration for that workload.
+Optional gitignored `workloads.machine.json` plus `--workload-config` overrides
+only PT placement (`target_cpuset`, `warmup_duration_s`, etc.), not service tuning.
 
-The command-line `--perf-cpus 0-7` option also supports CPU lists globally.
-Per-workload JSON values take precedence over command-line defaults.
-The machine Feedsim profile uses split containers: `target-feedsim-server`
-contains only `LeafNodeRank`, while `helper-feedsim-client` contains
-`DriverNodeRank`. Its cgroup trace therefore excludes the load generator.
+JSON fields for trace collection (per service):
+
+- `target_cpuset` / `perf_cpus`: target container and perf record CPUs
+- `bench_cpuset` / `helper_cpuset`: load generators and helpers
+- `warmup_duration_s` / `bench_duration_s`: timing for PT sampling
+
+The command-line `--perf-cpus` and `--target-cpuset` override JSON defaults when set.
 
 `--sudo-perf` elevates only perf commands (`record`, `stat`, `buildid-cache`,
 and `script`). The feature processor still runs as the invoking user. Sudo

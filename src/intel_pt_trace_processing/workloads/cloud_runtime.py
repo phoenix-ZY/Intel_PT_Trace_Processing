@@ -7,18 +7,28 @@ import sys
 import time
 from pathlib import Path
 
-from intel_pt_trace_processing.workloads.cbs_images import ensure_cbs_image_env
+from intel_pt_trace_processing.workloads.cbs_images import (
+    cloud_project_dir,
+    default_cbs_root,
+    ensure_cbs_image_env,
+)
 from intel_pt_trace_processing.workloads.cloud import docker_cpuset_arg
 
 ensure_cbs_image_env()
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_WORKLOAD_CONFIG = Path(
-    os.environ.get(
-        "CLOUD_WORKLOAD_CONFIG",
-        str(REPO_ROOT / "cloud_bench_configs" / "workloads.default.json"),
-    )
-)
+
+
+def default_workload_config_path() -> Path:
+    if os.environ.get("CLOUD_WORKLOAD_CONFIG"):
+        return Path(os.environ["CLOUD_WORKLOAD_CONFIG"])
+    cbs_path = default_cbs_root() / "cloud_bench_configs" / "workloads.cloud.json"
+    if cbs_path.is_file():
+        return cbs_path
+    return REPO_ROOT / "cloud_bench_configs" / "workloads.cloud.json"
+
+
+DEFAULT_WORKLOAD_CONFIG = default_workload_config_path()
 NETWORK_NAME = "perf-net"
 NETWORK_SUBNET = "172.30.0.0/24"
 NETWORK_GATEWAY = "172.30.0.1"
@@ -176,16 +186,17 @@ def cleanup_all(extra_containers: list[str] | None = None):
 
 def ensure_bench_client(project_dir: Path, *, cpuset: str | None = None):
     """Start the bench-client container if not running."""
+    cloud_root = cloud_project_dir(default_cbs_root())
     result = run_cmd(["docker", "ps", "--format", "{{.Names}}"])
     if BENCH_CONTAINER in result.stdout.splitlines():
         return
-    log("🔧", "Starting bench-client container...")
+    log("🔧", f"Starting bench-client container (mount {cloud_root}:/data)...")
     docker_run(
         f"-d --name {BENCH_CONTAINER} "
         f"{docker_cpuset_arg(cpuset)}"
         f"--network {NETWORK_NAME} --ip {BENCH_IP} "
         f"--ulimit nofile=655350:655350 "
-        f"-v {project_dir}:/data "
+        f"-v {cloud_root}:/data "
         f"--entrypoint sleep "
         f"{DOCKER_BENCH_CLIENT_IMAGE} infinity"
     )
@@ -202,9 +213,10 @@ def wait_for_tool(tool: str, timeout: int = 60):
     sys.exit(f"❌ Tool '{tool}' not available in bench-client after {timeout}s")
 
 def ensure_static_files(project_dir: Path):
-    """Create www/ and certs/ directories with required files."""
-    www_dir = project_dir / "www"
-    certs_dir = project_dir / "certs"
+    """Create www/ and certs/ under the CBS cloud project dir (shared with CBS)."""
+    cloud_root = cloud_project_dir(default_cbs_root())
+    www_dir = cloud_root / "www"
+    certs_dir = cloud_root / "certs"
     www_dir.mkdir(exist_ok=True)
     certs_dir.mkdir(exist_ok=True)
 

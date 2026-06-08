@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 
-def _default_cbs_root() -> Path:
+def default_cbs_root() -> Path:
     for key in ("COLOCATION_BENCH_SUITE_DIR", "CBS_ROOT"):
         value = os.environ.get(key, "").strip()
         if value:
@@ -15,7 +15,7 @@ def _default_cbs_root() -> Path:
 
 def ensure_cbs_image_env() -> Path | None:
     """Load CBS conf/images.env into os.environ (setdefault only)."""
-    cbs_root = _default_cbs_root()
+    cbs_root = default_cbs_root()
     images_env = cbs_root / "conf" / "images.env"
     if not images_env.is_file():
         return None
@@ -45,4 +45,14 @@ def ensure_cbs_image_env() -> Path | None:
         "DOCKER_BENCH_CLIENT_IMAGE",
         os.environ.get("CBS_BENCH_CLIENT_IMAGE", "cbs-bench-client:ubuntu22"),
     )
+    return cbs_root
+
+
+def cloud_project_dir(cbs_root: Path | None = None) -> Path:
+    """Directory for www/, certs/, and bench-client /data mount (canonical: CBS root)."""
+    if cbs_root is None:
+        cbs_root = default_cbs_root()
+    override = os.environ.get("CBS_CLOUD_PROJECT_DIR", "").strip()
+    if override:
+        return Path(override)
     return cbs_root

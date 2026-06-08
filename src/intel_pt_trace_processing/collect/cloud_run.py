@@ -34,6 +34,25 @@ DEFAULT_WARMUP_DURATION = 20
 DEFAULT_PERF_MMAP_PAGES = "2048,16384"
 
 
+def _import_cbs_workload_lib(cbs_root: Path):
+    scripts = cbs_root / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import cloud_workload_lib as cwl
+
+    return cwl
+
+
+def _cbs_root_from_args(cli_args: argparse.Namespace | None) -> Path:
+    if cli_args is not None and getattr(cli_args, "colocation_bench_suite_dir", None):
+        return Path(cli_args.colocation_bench_suite_dir)
+    for key in ("COLOCATION_BENCH_SUITE_DIR", "CBS_ROOT"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return Path(value)
+    return Path.home() / "colocation-bench-suite"
+
+
 def _render_workload_cmd(
     cmd: str,
     *,
@@ -346,103 +365,29 @@ def run_single_config(
         target_role = _target_role(config)
         helper_roles = _helper_roles(config)
         container_name = str(target_role["container_name"])
-
-        for helper_role in helper_roles:
-            helper_name = str(helper_role["container_name"])
-            docker_stop_rm(helper_name)
-            helper_cmd = _render_workload_cmd(
-                str(helper_role["start_cmd"]),
-                cli_args=runtime_args,
-                project_dir=project_dir,
-                output_dir=output_dir,
-                bench_name=bench_name,
-                service_type=service_type,
-                config_name=config_name,
-            )
-            log("⚙️", f"Starting helper {helper_name}...")
-            result = run_cmd(helper_cmd, shell=True)
-            if result.returncode != 0:
-                log("❌", f"Failed to start helper {helper_name}: {result.stderr.strip()}")
-                _cleanup_helpers(helper_roles)
-                return
-            for check in helper_role.get("ready_checks", []):
-                if not _run_ready_check(
-                    check,
-                    target_container_name=helper_name,
-                    cli_args=runtime_args,
-                    project_dir=project_dir,
-                    output_dir=output_dir,
-                    bench_name=bench_name,
-                    service_type=service_type,
-                    config_name=config_name,
-                ):
-                    _cleanup_helpers(helper_roles)
-                    return
-
-        docker_stop_rm(container_name)
-        server_cmd = _render_workload_cmd(
-            str(target_role["start_cmd"]),
-            cli_args=runtime_args,
-            project_dir=project_dir,
-            output_dir=output_dir,
-            bench_name=bench_name,
-            service_type=service_type,
+        cbs_root = _cbs_root_from_args(runtime_args)
+        cwl = _import_cbs_workload_lib(cbs_root)
+        ctx = cwl.resolve_context(
+            config,
+            cbs_root_path=cbs_root,
+            target_cpuset=runtime_target_cpuset,
+            helper_cpuset=str(
+                getattr(runtime_args, "helper_cpuset", "")
+                or config.get("helper_cpuset", config.get("bench_cpuset", ""))
+            ),
+            bench_cpuset=str(
+                getattr(runtime_args, "bench_cpuset", "")
+                or config.get("bench_cpuset", "")
+            ),
             config_name=config_name,
         )
-        log("⚙️", f"Starting {container_name}...")
-        result = run_cmd(server_cmd, shell=True)
-        if result.returncode != 0:
-            log("❌", f"Failed to start {container_name}: {result.stderr.strip()}")
-            _cleanup_helpers(helper_roles)
+        try:
+            cwl.start_service(service_type, ctx, config=config)
+        except RuntimeError as exc:
+            log("❌", str(exc))
             return
 
-        time.sleep(int(config.get("startup_wait_s", 5)))
-
-        for check in list(target_role.get("ready_checks", [])) + list(config.get("ready_checks", [])):
-            if not _run_ready_check(
-                check,
-                target_container_name=container_name,
-                cli_args=runtime_args,
-                project_dir=project_dir,
-                output_dir=output_dir,
-                bench_name=bench_name,
-                service_type=service_type,
-                config_name=config_name,
-            ):
-                docker_stop_rm(container_name)
-                _cleanup_helpers(helper_roles)
-                return
-
-        for step in config.get("prepare_steps", []):
-            if not _run_prepare_step(
-                step,
-                cli_args=runtime_args,
-                project_dir=project_dir,
-                output_dir=output_dir,
-                bench_name=bench_name,
-                service_type=service_type,
-                config_name=config_name,
-            ):
-                docker_stop_rm(container_name)
-                _cleanup_helpers(helper_roles)
-                return
-
-        # ── Start the benchmark load ────────────────────────────────────
-        bench_cmd = _render_workload_cmd(
-            str(config.get("load_cmd", config["bench_cmd"])),
-            bench_duration=effective_bench_duration,
-            cli_args=runtime_args,
-            project_dir=project_dir,
-            output_dir=output_dir,
-            bench_name=bench_name,
-            service_type=service_type,
-            config_name=config_name,
-        )
-        log("🔨", f"Starting load: {bench_cmd}")
-        bench_process = subprocess.Popen(
-            bench_cmd, shell=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        bench_process = cwl.popen_load(config, ctx, effective_bench_duration)
 
         # Wait for load to warm up before tracing
         log("🔥", f"Warming up for {effective_warmup}s before tracing...")

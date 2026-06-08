@@ -25,14 +25,12 @@ for _path in (REPO_ROOT, SRC_DIR):
 from intel_pt_trace_processing.collect.cloud_args import parse_cloud_args
 from intel_pt_trace_processing.collect.cloud_postprocess import cloud_run_perf_postprocess
 from intel_pt_trace_processing.collect.cloud_run import run_single_config
+from intel_pt_trace_processing.workloads.cbs_images import default_cbs_root, ensure_cbs_image_env
 from intel_pt_trace_processing.workloads.cloud_runtime import (
     BENCH_CONTAINER,
     NETWORK_NAME,
     cleanup_all,
     docker_stop_rm,
-    ensure_bench_client,
-    ensure_network,
-    ensure_static_files,
     load_workload_config_file,
     log,
     merge_config_matrix,
@@ -91,10 +89,22 @@ def main():
         extra_configs = load_workload_config_file(config_path.resolve(), project_dir)
         merge_config_matrix(all_configs, extra_configs)
 
-    ensure_static_files(project_dir)
+    cbs_root = ensure_cbs_image_env() or default_cbs_root()
     cleanup_all(workload_container_names(all_configs))
-    ensure_network()
-    ensure_bench_client(project_dir, cpuset=args.bench_cpuset)
+    scripts_dir = cbs_root / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import cloud_workload_lib as cwl
+
+    cwl.ensure_cloud_stack(
+        cwl.WorkloadContext(
+            cbs_root=cbs_root,
+            target_cpuset="",
+            helper_cpuset="",
+            bench_cpuset=str(args.bench_cpuset),
+            config_name="cloud",
+        )
+    )
 
     services_to_run = _services_to_run(args.service, list(all_configs))
     if args.config_name:
