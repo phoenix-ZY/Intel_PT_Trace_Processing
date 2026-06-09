@@ -126,7 +126,7 @@ def process_perf_stream(
 ) -> PerfStreamResult:
     processor_bin = script_dir / "trace_feature_processor"
     if not processor_bin.exists():
-        raise RuntimeError(f"missing {processor_bin}; run build_recover_mem_addrs_uc.sh first")
+        raise RuntimeError(f"missing {processor_bin}; run build_trace_tools.sh first")
 
     intermediate_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)

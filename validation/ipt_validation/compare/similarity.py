@@ -184,3 +184,30 @@ def warmup_cross_similarity(cases: list[Any], out_base: Path) -> tuple[Path, Pat
         mean_cos = sum(float(x["cosine"]) for x in b) / len(b)
         print(f"[warmup] bench={bench} data_ref_pairs={len(b)} mean_cos={mean_cos:.4f}")
     return out_json, out_csv
+
+
+def flatten_trace_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    metadata = profile.get("metadata") if isinstance(profile, dict) else None
+    if not isinstance(metadata, dict):
+        metadata = {}
+    source = metadata.get("source")
+    if not isinstance(source, dict):
+        source = {}
+    row: dict[str, Any] = {
+        "schema": profile.get("schema", ""),
+        "prefix": metadata.get("prefix", ""),
+        "source_kind": source.get("kind", ""),
+        "source_path": source.get("path", ""),
+    }
+    features = profile.get("features")
+    if not isinstance(features, dict):
+        return row
+    for group, values in features.items():
+        if not isinstance(values, dict):
+            continue
+        for key, value in values.items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float, str)):
+                row[f"{group}_{key}"] = value
+    return row

@@ -8,13 +8,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from intel_pt_trace_processing.collect.perf_targets import PerfTarget, cpu_perf_target, perf_record_cmd, perf_stat_cmd
-from intel_pt_trace_processing.collect.perf_stats import parse_perf_stat_csv, parse_perf_stat_unsupported
-from intel_pt_trace_processing.collect.spec_layout import CaseLayout, PreparedCase, make_case_layout
+from ipt_validation.collect.perf_targets import PerfTarget, cpu_perf_target, perf_record_cmd, perf_stat_cmd
+from ipt_validation.collect.perf_stats import parse_perf_stat_csv, parse_perf_stat_unsupported
+from ipt_validation.collect.spec_layout import CaseLayout, PreparedCase, make_case_layout
 from intel_pt_trace_processing.core.commands import run_step
 from intel_pt_trace_processing.perf.selection import load_selection_sidecar, write_selection_sidecar
-from intel_pt_trace_processing.workloads.spec import build_spec_shell_command
-from intel_pt_trace_processing.workloads.spec_runtime import (
+from ipt_validation.workloads.spec import build_spec_shell_command
+from ipt_validation.workloads.spec_runtime import (
     cleanup_pid,
     extract_cmd_line,
     pick_spec_benchmark_pid,

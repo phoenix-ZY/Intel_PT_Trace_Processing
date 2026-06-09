@@ -70,8 +70,6 @@ vgcore.*
 # Local test files (not for distribution / version control)
 test/
 
-recover_mem_addrs_uc
-
 analyze_sde_trace_uc
 
 trace_feature_processor
@@ -84,6 +82,3 @@ certs
 paper
 # 运行日志，无需提交
 *.log
-
-# Optional local overrides (e.g. cpuset). Canonical matrix is in CBS repo.
-cloud_bench_configs/workloads.*.json

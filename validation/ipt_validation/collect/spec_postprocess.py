@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import sys
 from pathlib import Path
 
-from intel_pt_trace_processing.collect.spec_layout import PreparedCase, RunCase, make_case_layout
-from intel_pt_trace_processing.collect.spec_trace import run_trace_phase
-from intel_pt_trace_processing.compare.similarity import load_compare_metrics, maybe_write_feature_bundle
+from ipt_validation.collect.spec_layout import PreparedCase, RunCase, make_case_layout
+from ipt_validation.collect.spec_trace import run_trace_phase
+from ipt_validation.compare.mem_trace import compare_memory_profiles
+from ipt_validation.compare.similarity import (
+    flatten_trace_profile,
+    load_compare_metrics,
+    maybe_write_feature_bundle,
+)
 from intel_pt_trace_processing.core.commands import run_step
 from intel_pt_trace_processing.core.features import (
     build_trace_profile,
@@ -16,7 +19,6 @@ from intel_pt_trace_processing.core.features import (
     load_json_object,
     write_trace_profile,
 )
-from intel_pt_trace_processing.tools.flatten import flatten_trace_profile
 from intel_pt_trace_processing.perf.selection import load_selection_sidecar
 from intel_pt_trace_processing.perf.stream import process_perf_stream
 
@@ -149,7 +151,7 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
     if args.enable_sde:
         sde_analyzer = script_dir / "analyze_sde_trace_uc"
         if not sde_analyzer.exists():
-            raise RuntimeError(f"missing {sde_analyzer}; run build_recover_mem_addrs_uc.sh first")
+            raise RuntimeError(f"missing {sde_analyzer}; run build_trace_tools.sh first")
         need_sde_analyze = not _nonempty(layout.sde_trace_profile_json)
         if need_sde_analyze:
             run_step(
@@ -221,26 +223,12 @@ def run_post_phase(*, script_dir: Path, prepared: PreparedCase, args: argparse.N
     if args.enable_sde:
         if not layout.sde_trace_profile_json.exists():
             raise RuntimeError("SDE analysis did not produce trace_profile.json")
-        run_step(
-            [
-                sys.executable,
-                str(script_dir / "scripts/tools/compare_mem_trace_metrics.py"),
-                "--ref-profile",
-                str(layout.sde_trace_profile_json),
-                "--test-profile",
-                str(perf_result.trace_profile_json),
-                "--memory",
-                "data",
-                "--top-k",
-                str(max(1, args.stride_top_k)),
-                "--max-error-bins",
-                "20",
-                "--sdp-max-lines",
-                "262144",
-                "--json-out",
-                str(layout.data_sim_json),
-            ],
-            verbose=args.verbose,
+        compare_memory_profiles(
+            ref_profile=layout.sde_trace_profile_json,
+            test_profile=perf_result.trace_profile_json,
+            memory="data",
+            top_k=max(1, args.stride_top_k),
+            json_out=layout.data_sim_json,
         )
         metrics.update(load_compare_metrics(layout.data_sim_json, metric_prefix="data_"))
         if args.write_feature_bundle:

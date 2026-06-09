@@ -4,31 +4,27 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
-import subprocess
-import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-SRC_DIR = REPO_ROOT / "src"
-for _path in (REPO_ROOT, SRC_DIR):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
+from ipt_validation.paths import repo_root
 
-from intel_pt_trace_processing.compare.similarity import (
+REPO_ROOT = repo_root()
+
+from ipt_validation.compare.similarity import (
     warmup_cross_similarity,
 )
-from intel_pt_trace_processing.collect.spec_postprocess import run_post_phase
-from intel_pt_trace_processing.collect.spec_layout import (
+from ipt_validation.collect.spec_postprocess import run_post_phase
+from ipt_validation.collect.spec_layout import (
     CaseLayout,
     PreparedCase,
     RunCase,
     make_case_layout,
 )
-from intel_pt_trace_processing.collect.spec_trace import (
+from ipt_validation.collect.spec_trace import (
     run_trace_phase,
     run_trace_phase_perf_stream,
 )
-from intel_pt_trace_processing.collect.perf_targets import (
+from ipt_validation.collect.perf_targets import (
     add_perf_target_args,
     validate_perf_target_args,
 )
@@ -37,7 +33,7 @@ from intel_pt_trace_processing.perf.stream import (
     validate_perf_postprocess_args,
 )
 from intel_pt_trace_processing.perf.selection import load_selection_sidecar
-from intel_pt_trace_processing.workloads.spec_runtime import (
+from ipt_validation.workloads.spec_runtime import (
     parse_run_list_entry,
 )
 
@@ -467,16 +463,6 @@ def run_spec_batch_main(args: argparse.Namespace, *, script_dir: Path | None = N
         print(f"  warmup pairwise json: {warmup_pair[0]}")
         print(f"  warmup pairwise csv:  {warmup_pair[1]}")
 
-    if getattr(args, "export_full_features", True):
-        exporter = (root / "scripts/tools/export_perf_full_features.py").resolve()
-        try:
-            subprocess.run(
-                [sys.executable, str(exporter), "--output-base", str(args.output_base)],
-                check=True,
-                text=True,
-            )
-        except Exception as e:
-            print("[warn] export full features failed:", e)
     return 0
 
 
@@ -581,12 +567,6 @@ def main() -> int:
         type=int,
         default=0,
         help="Max samples per benchmark in stream mode (0 = unlimited until exit).",
-    )
-    ap.add_argument(
-        "--export-full-features",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="After run, export perf_full_features.(csv/xlsx) from trace_profile.json files.",
     )
     args = ap.parse_args()
     return run_spec_batch_main(args)

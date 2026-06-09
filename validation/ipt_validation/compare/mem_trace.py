@@ -1,18 +1,10 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
 import json
 import math
-import sys
 from pathlib import Path
 from typing import Iterable
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SRC_DIR = REPO_ROOT / "src"
-for _path in (REPO_ROOT, SRC_DIR):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
 
 from intel_pt_trace_processing.core.features import load_json_object, memory_feature_view
 
@@ -95,6 +87,45 @@ def compare_named_vectors(
     }
 
 
+def compare_memory_profiles(
+    *,
+    ref_profile: Path,
+    test_profile: Path,
+    json_out: Path,
+    memory: str = "data",
+    top_k: int = 20,
+    excluded_features: set[str] | None = None,
+) -> dict:
+    ref_obj = load_json_object(ref_profile)
+    test_obj = load_json_object(test_profile)
+    ref = memory_feature_view(ref_obj, memory=memory)
+    test = memory_feature_view(test_obj, memory=memory)
+    if not ref:
+        raise ValueError(f"empty ref {memory} feature view: {ref_profile}")
+    if not test:
+        raise ValueError(f"empty test {memory} feature view: {test_profile}")
+    excluded = excluded_features if excluded_features is not None else set(DEFAULT_EXCLUDED_FEATURES)
+
+    out = {
+        "schema": "trace-feature-vector-compare-v1",
+        "ref_profile": str(ref_profile),
+        "test_profile": str(test_profile),
+        "memory_view": memory,
+        "excluded_features": sorted(excluded),
+        "ref_features": ref,
+        "test_features": test,
+        "overall_vector": compare_named_vectors(
+            ref,
+            test,
+            top_k=max(1, top_k),
+            excluded_features=excluded,
+        ),
+    }
+    json_out.parent.mkdir(parents=True, exist_ok=True)
+    json_out.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare final memory feature groups from trace_profile.json")
     parser.add_argument("--ref-profile", type=Path, required=True)
@@ -122,36 +153,16 @@ def main() -> int:
     )
     parser.add_argument("--json-out", type=Path, required=True)
     args = parser.parse_args()
-
-    ref_profile = load_json_object(args.ref_profile)
-    test_profile = load_json_object(args.test_profile)
-    ref = memory_feature_view(ref_profile, memory=args.memory)
-    test = memory_feature_view(test_profile, memory=args.memory)
-    if not ref:
-        raise SystemExit(f"empty ref {args.memory} feature view: {args.ref_profile}")
-    if not test:
-        raise SystemExit(f"empty test {args.memory} feature view: {args.test_profile}")
     excluded_features = {item.strip() for item in args.exclude_features.split(",") if item.strip()}
-
-    out = {
-        "schema": "trace-feature-vector-compare-v1",
-        "ref_profile": str(args.ref_profile),
-        "test_profile": str(args.test_profile),
-        "memory_view": args.memory,
-        "excluded_features": sorted(excluded_features),
-        "ref_features": ref,
-        "test_features": test,
-        "overall_vector": compare_named_vectors(
-            ref,
-            test,
-            top_k=max(1, args.top_k),
-            excluded_features=excluded_features,
-        ),
-    }
-    text = json.dumps(out, indent=2, ensure_ascii=False)
-    print(text)
-    args.json_out.parent.mkdir(parents=True, exist_ok=True)
-    args.json_out.write_text(text, encoding="utf-8")
+    out = compare_memory_profiles(
+        ref_profile=args.ref_profile,
+        test_profile=args.test_profile,
+        json_out=args.json_out,
+        memory=args.memory,
+        top_k=max(1, args.top_k),
+        excluded_features=excluded_features,
+    )
+    print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0
 
 

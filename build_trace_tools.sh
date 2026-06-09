@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
+# Build trace_feature_processor (Intel PT) and analyze_sde_trace_uc (SDE validation).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 C_SRC_DIR="${SCRIPT_DIR}/csrc"
-SRC="${C_SRC_DIR}/recover_mem_addrs_uc.c"
 CORE_SRC="${C_SRC_DIR}/trace_feature_core.c"
-OUT="${SCRIPT_DIR}/recover_mem_addrs_uc"
 PROCESSOR_SRC="${C_SRC_DIR}/trace_feature_processor.c"
 PROCESSOR_OUT="${SCRIPT_DIR}/trace_feature_processor"
 SDE_SRC="${C_SRC_DIR}/analyze_sde_trace_uc.c"
@@ -32,6 +31,12 @@ resolve_xed_prefix() {
 }
 
 XED_PREFIX="$(resolve_xed_prefix)"
+
+build_sde_analyzer() {
+  gcc -O3 -march=native -std=c11 -Wall -Wextra \
+    "${SDE_SRC}" "${CORE_SRC}" -o "${SDE_OUT}" -lm
+  echo "[build] done: ${SDE_OUT}"
+}
 
 build_trace_feature_processor_if_xed() {
   local unicorn_inc="$1"
@@ -92,7 +97,6 @@ PY
   if [[ -n "${inc}" && -d "${inc}/unicorn" && -n "${lib_dir}" && -d "${lib_dir}" ]]; then
     local so_name=""
     if compgen -G "${lib_dir}/libunicorn.so*" >/dev/null; then
-      # Prefer the shared library if present (pip wheels often ship libunicorn.so.2 without a libunicorn.so symlink)
       so_name="$(ls -1 "${lib_dir}"/libunicorn.so* 2>/dev/null | head -n 1 | xargs -n1 basename || true)"
     fi
     if [[ -n "${so_name}" ]] || compgen -G "${lib_dir}/libunicorn.a" >/dev/null; then
@@ -101,16 +105,10 @@ PY
       if [[ -n "${so_name}" ]]; then
         unicorn_link="-l:${so_name}"
       fi
-      gcc -O3 -march=native -std=c11 -Wall -Wextra \
-        -I"${inc}" "${SRC}" "${CORE_SRC}" -o "${OUT}" \
-        -L"${lib_dir}" -Wl,-rpath,"${lib_dir}" ${unicorn_link} -pthread -lm
       build_trace_feature_processor_if_xed \
         "${inc}" \
         -L"${lib_dir}" -Wl,-rpath,"${lib_dir}" ${unicorn_link}
-      gcc -O3 -march=native -std=c11 -Wall -Wextra \
-        "${SDE_SRC}" "${CORE_SRC}" -o "${SDE_OUT}" -lm
-      echo "[build] done: ${OUT}"
-      echo "[build] done: ${SDE_OUT}"
+      build_sde_analyzer
       exit 0
     fi
   fi
@@ -132,16 +130,10 @@ try_build_with_prefix() {
       if [[ -n "${so_name}" ]]; then
         unicorn_link="-l:${so_name}"
       fi
-      gcc -O3 -march=native -std=c11 -Wall -Wextra \
-        -I"${inc}" "${SRC}" "${CORE_SRC}" -o "${OUT}" \
-        -L"${lib}" -Wl,-rpath,"${lib}" ${unicorn_link} -pthread -lm
       build_trace_feature_processor_if_xed \
         "${inc}" \
         -L"${lib}" -Wl,-rpath,"${lib}" ${unicorn_link}
-      gcc -O3 -march=native -std=c11 -Wall -Wextra \
-        "${SDE_SRC}" "${CORE_SRC}" -o "${SDE_OUT}" -lm
-      echo "[build] done: ${OUT}"
-      echo "[build] done: ${SDE_OUT}"
+      build_sde_analyzer
       exit 0
     fi
   fi
@@ -149,13 +141,8 @@ try_build_with_prefix() {
 
 if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists unicorn; then
   echo "[build] using pkg-config unicorn"
-  gcc -O3 -march=native -std=c11 -Wall -Wextra \
-    "${SRC}" "${CORE_SRC}" -o "${OUT}" $(pkg-config --cflags --libs unicorn) -lm
   build_trace_feature_processor_if_xed "" $(pkg-config --cflags --libs unicorn)
-  gcc -O3 -march=native -std=c11 -Wall -Wextra \
-    "${SDE_SRC}" "${CORE_SRC}" -o "${SDE_OUT}" -lm
-  echo "[build] done: ${OUT}"
-  echo "[build] done: ${SDE_OUT}"
+  build_sde_analyzer
   exit 0
 fi
 
@@ -177,7 +164,6 @@ if [[ -n "${CONDA_PREFIX:-}" ]]; then
 fi
 
 if [[ -n "${VIRTUAL_ENV:-}" ]]; then
-  # Kept for backward compatibility, but prefer try_build_with_python_unicorn above.
   try_build_with_python_unicorn python3
   try_build_with_python_unicorn python
 fi
@@ -186,8 +172,10 @@ echo "[build] could not resolve unicorn dev flags automatically."
 echo "Recommended fix (Ubuntu):"
 echo "  sudo apt-get update && sudo apt-get install -y libunicorn-dev pkg-config"
 echo "Then:"
-echo "  bash build_recover_mem_addrs_uc.sh"
-echo "Try manually:"
-echo "  gcc -O3 -std=c11 -Wall -Wextra -I/path/to/unicorn/include csrc/recover_mem_addrs_uc.c csrc/trace_feature_core.c -L/path/to/lib -lunicorn -o recover_mem_addrs_uc"
-echo "  gcc -O3 -std=c11 -Wall -Wextra csrc/analyze_sde_trace_uc.c csrc/trace_feature_core.c -o analyze_sde_trace_uc"
+echo "  bash build_trace_tools.sh"
+echo "Manual build examples:"
+echo "  gcc -O3 -std=c11 -Wall -Wextra -I/path/to/unicorn/include -I\${XED_PREFIX}/include \\"
+echo "    csrc/trace_feature_processor.c csrc/trace_feature_core.c -o trace_feature_processor \\"
+echo "    -L/path/to/lib -L\${XED_PREFIX}/lib -lunicorn -lxed -pthread -lm"
+echo "  gcc -O3 -std=c11 -Wall -Wextra csrc/analyze_sde_trace_uc.c csrc/trace_feature_core.c -o analyze_sde_trace_uc -lm"
 exit 2

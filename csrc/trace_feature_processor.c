@@ -1,8 +1,7 @@
 #define _GNU_SOURCE
 
-#define main recover_mem_addrs_uc_legacy_main
+/* Unicorn recovery helpers (hook_mem, maps, salvage, parse_trace_line, ...). */
 #include "recover_mem_addrs_uc.c"
-#undef main
 
 #include <xed/xed-interface.h>
 
