@@ -33,7 +33,7 @@ validation/
 - **Workload launch + PT record**: `colocation-bench-suite`
 - **PT feature extraction API**: `trace_feature_api.py` at repo root
 
-See `colocation-bench-suite/docs/CBS_IPT_ALIGNMENT.md`.
+See `docs/CBS_IPT_ALIGNMENT.md` in the **colocation-bench-suite** repository.
 
 Per-case SDE vs perf comparison: `ipt_validation/compare/mem_trace.py`.
 Batch summaries: `summary.json` / `summary.csv` under `--output-base`.

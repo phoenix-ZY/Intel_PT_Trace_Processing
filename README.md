@@ -8,7 +8,8 @@ register dependencies, and IPC.
 (`experiments/intel_pt/`, `PROFILE_INTEL_PT=1` offline profiling).
 This repo is the **processing API only** — `perf.data` in, features out.
 
-CBS integration details: `colocation-bench-suite/docs/CBS_IPT_ALIGNMENT.md`.
+CBS integration is documented in the **colocation-bench-suite** repo
+(`docs/CBS_IPT_ALIGNMENT.md` there — not in this repository).
 
 ## Inputs and output
 
