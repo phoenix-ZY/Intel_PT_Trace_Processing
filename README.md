@@ -67,6 +67,11 @@ perf.data
 `build_trace_tools.sh` also builds `analyze_sde_trace_uc` for SDE validation only;
 the main line needs **`trace_feature_processor`** only.
 
+`trace_feature_processor` defaults to `--fast-exit on`: after output files are
+closed successfully, the process lets the OS reclaim Unicorn state instead of
+running Unicorn's potentially very slow fragmented-memory teardown. Use
+`--fast-exit off` only when explicit library cleanup is required.
+
 Build deps: Linux `perf` (Intel PT), Unicorn, XED (`XED_PREFIX` if not in default paths).
 
 ## Repository layout

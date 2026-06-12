@@ -101,6 +101,7 @@ typedef struct {
     bool analysis_stack_depth;
     bool split_crossline;
     bool mvs_enable;
+    bool fast_exit;
     bool salvage_invalid_mem;
     bool salvage_reads;
     int seed;
@@ -128,6 +129,7 @@ static void processor_usage(const char *prog) {
         "  --analysis-stride-bin-cap-lines N  stride bin cap, default 262144\n"
         "  --split-crossline on|off           split cross-line memory accesses, default on\n"
         "  --mvs on|off                       synthetic memory value stream seeding, default on\n"
+        "  --fast-exit on|off                 let the OS reclaim Unicorn state, default on\n"
         "  --salvage-invalid-mem              salvage memory operands for invalid Unicorn insns\n"
         "  --salvage-reads                    include read salvage with --salvage-invalid-mem\n"
         "  --seed N                           deterministic seed, default 1\n"
@@ -955,6 +957,7 @@ int main(int argc, char **argv) {
         .analysis_stack_depth = true,
         .split_crossline = true,
         .mvs_enable = true,
+        .fast_exit = true,
         .salvage_invalid_mem = false,
         .salvage_reads = false,
         .seed = 1,
@@ -1006,6 +1009,11 @@ int main(int argc, char **argv) {
             if (!strcmp(argv[i], "on")) opts.mvs_enable = true;
             else if (!strcmp(argv[i], "off")) opts.mvs_enable = false;
             else die("invalid --mvs");
+        } else if (!strcmp(argv[i], "--fast-exit")) {
+            if (++i >= argc) die("missing value for --fast-exit");
+            if (!strcmp(argv[i], "on")) opts.fast_exit = true;
+            else if (!strcmp(argv[i], "off")) opts.fast_exit = false;
+            else die("invalid --fast-exit");
         } else if (!strcmp(argv[i], "--salvage-invalid-mem")) {
             opts.salvage_invalid_mem = true;
         } else if (!strcmp(argv[i], "--salvage-reads")) {
@@ -1256,14 +1264,20 @@ int main(int argc, char **argv) {
         salvaged_invalid_insns
     );
 
-    fprintf(
-        stderr,
-        "done: parsed_lines=%" PRIu64 " executed_insns=%" PRIu64 " mem_events=%" PRIu64 " xed_decoded=%" PRIu64 "\n",
-        parsed_lines,
-        executed,
-        ctx.mem_read_events + ctx.mem_write_events,
-        portrait.decoded
-    );
+    if (fclose(mem_out) != 0) die("failed to close recovered memory output");
+    if (fclose(combined_out) != 0) die("failed to close combined feature JSON");
+
+    if (opts.fast_exit) {
+        fprintf(
+            stderr,
+            "done: parsed_lines=%" PRIu64 " executed_insns=%" PRIu64 " mem_events=%" PRIu64 " xed_decoded=%" PRIu64 "\n",
+            parsed_lines,
+            executed,
+            ctx.mem_read_events + ctx.mem_write_events,
+            portrait.decoded
+        );
+        return 0;
+    }
 
     map_free(&ipmap);
     set_free(&pages);
@@ -1288,7 +1302,13 @@ int main(int argc, char **argv) {
     tf_profile_destroy(inst_profile);
     tf_profile_destroy(data_profile);
     uc_close(uc);
-    fclose(mem_out);
-    fclose(combined_out);
+    fprintf(
+        stderr,
+        "done: parsed_lines=%" PRIu64 " executed_insns=%" PRIu64 " mem_events=%" PRIu64 " xed_decoded=%" PRIu64 "\n",
+        parsed_lines,
+        executed,
+        ctx.mem_read_events + ctx.mem_write_events,
+        portrait.decoded
+    );
     return 0;
 }

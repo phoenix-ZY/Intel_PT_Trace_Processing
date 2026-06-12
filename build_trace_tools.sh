@@ -19,6 +19,7 @@ resolve_xed_prefix() {
   local candidate
   for candidate in \
     "${HOME}/xed/obj/wkit" \
+    "${HOME}/ali/xed/obj/wkit" \
     "/flash/huangtianhao/xed/obj/wkit" \
     "/usr/local"; do
     if [[ -f "${candidate}/include/xed/xed-interface.h" ]] && compgen -G "${candidate}/lib/libxed.*" >/dev/null; then
